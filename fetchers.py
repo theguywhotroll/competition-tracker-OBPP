@@ -349,17 +349,24 @@ def fetch_indiabonds():
     rows = []
     now = datetime.now()
     try:
-        resp = requests.get(
-            list_url,
-            params={"page_no": 1, "page_size": 200, "sort_by": "yield_high_to_low", "tag_name": "All Bonds"},
-            headers=headers,
-            timeout=30,
-        )
-        resp.raise_for_status()
-        bond_list = resp.json().get("bond_list", [])
-
         session = requests.Session()
         session.headers.update(headers)
+
+        bond_list = []
+        page_no = 1
+        page_size = 12  # mirrors the site's own default page size
+        total_pages = 1
+        while page_no <= total_pages:
+            resp = session.get(
+                list_url,
+                params={"page_no": page_no, "page_size": page_size, "sort_by": "yield_high_to_low", "tag_name": "All Bonds"},
+                timeout=30,
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+            bond_list.extend(payload.get("bond_list", []))
+            total_pages = payload.get("page_details", {}).get("total_pages", page_no)
+            page_no += 1
 
         for item in bond_list:
             isin = item.get("isin", "")
@@ -398,6 +405,8 @@ def fetch_indiabonds():
             })
         print(f"IndiaBonds: {len(rows)} rows")
     except requests.exceptions.RequestException as e:
+        import traceback
+        traceback.print_exc()
         print(f"Error fetching IndiaBonds data: {e}")
     return rows
 
