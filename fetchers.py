@@ -292,7 +292,7 @@ def extract_rating(window: str):
 
 def extract_face_value(window: str):
     m = FACE_VALUE_RE.search(window)
-    return m.group(1) if m else ""
+    return float(m.group(1)) if m else ""
 
 
 def extract_tenure_months(window: str):
@@ -381,12 +381,16 @@ def fetch_indiabonds():
                 except (requests.exceptions.RequestException, ValueError):
                     face_value = ""
 
-            yield_str = item.get("yield_value", "") or ""
+            yield_str = (item.get("yield_value", "") or "").replace("%", "").strip()
+            try:
+                yield_val = float(yield_str) if yield_str else ""
+            except ValueError:
+                yield_val = ""
             rows.append({
                 "OBPP": "IndiaBonds",
                 "ISIN": isin,
                 "Issuer": item.get("issuer_name", ""),
-                "YTM (%)": yield_str.replace("%", "").strip(),
+                "YTM (%)": yield_val,
                 "Rating": item.get("rating", ""),
                 "Tenure (Months)": tenure_months,
                 "Face Value": face_value,
@@ -583,6 +587,11 @@ def fetch_goldenpi():
             ytm = item.get("ytm")
             if ytm is None:
                 ytm = item.get("ytmc")
+            face_value = item.get("stagFaceValue")
+            try:
+                face_value = float(face_value) if face_value not in (None, "") else ""
+            except (TypeError, ValueError):
+                face_value = ""
             rows.append({
                 "OBPP": "GoldenPi",
                 "ISIN": item.get("isin") or "",
@@ -590,7 +599,7 @@ def fetch_goldenpi():
                 "YTM (%)": ytm,
                 "Rating": extract_goldenpi_rating(item.get("sortedCreditRating")),
                 "Tenure (Months)": item.get("tenureMonth", ""),
-                "Face Value": item.get("stagFaceValue", ""),
+                "Face Value": face_value,
                 "Minimum Investment Amount": item.get("settlementAmount", ""),
             })
         print(f"GoldenPi: {len(rows)} rows")
@@ -663,8 +672,10 @@ def parse_tfi_listing_html(html):
             value = full[len(label):].strip() if full.startswith(label) else full.replace(label, "").strip()
             fields[label] = value
 
-        yield_val = re.sub(r"[^\d.]", "", fields.get("Yield (%)", ""))
-        min_investment = re.sub(r"[^\d.]", "", fields.get("Min. Investment", ""))
+        yield_digits = re.sub(r"[^\d.]", "", fields.get("Yield (%)", ""))
+        min_investment_digits = re.sub(r"[^\d.]", "", fields.get("Min. Investment", ""))
+        yield_val = float(yield_digits) if yield_digits else ""
+        min_investment = float(min_investment_digits) if min_investment_digits else ""
         tenure_months = parse_tfi_ymd_tenure(fields.get("Tenure", ""))
 
         cards.append({
@@ -705,7 +716,7 @@ def parse_tfi_detail_html(html, fallback_title=""):
     return (
         isin_m.group(0) if isin_m else "",
         issuer,
-        fv_m.group(1).replace(",", "") if fv_m else "",
+        float(fv_m.group(1).replace(",", "")) if fv_m else "",
     )
 
 
