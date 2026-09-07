@@ -1,11 +1,35 @@
 import re
 import struct
+import subprocess
+import sys
 import time
 from datetime import datetime
 
 import pytz
 import requests
 from dateutil.relativedelta import relativedelta
+
+_playwright_browser_ready = False
+
+
+def _ensure_playwright_chromium():
+    """Streamlit Community Cloud has no post-install hook to run
+    `playwright install chromium` after deploy, so we lazily install it here
+    on first use. This adds a one-time delay (~30-60s) the first time a
+    Playwright-based fetcher runs after a fresh container boot; subsequent
+    calls in the same running container are unaffected."""
+    global _playwright_browser_ready
+    if _playwright_browser_ready:
+        return
+    try:
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            browser.close()
+        _playwright_browser_ready = True
+    except Exception:
+        subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=False)
+        _playwright_browser_ready = True  # let the real launch below surface any remaining error
 
 COLUMNS = [
     "OBPP",
@@ -536,6 +560,7 @@ def fetch_goldenpi():
         print("Skipping GoldenPi: install with `pip install playwright` and `playwright install chromium`")
         return rows
 
+    _ensure_playwright_chromium()
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
@@ -693,6 +718,7 @@ def fetch_thefixedincome():
               "and `playwright install chromium`")
         return rows
 
+    _ensure_playwright_chromium()
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
