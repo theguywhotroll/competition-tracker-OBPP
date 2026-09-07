@@ -31,6 +31,25 @@ def _ensure_playwright_chromium():
         subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=False)
         _playwright_browser_ready = True  # let the real launch below surface any remaining error
 
+
+def to_float(value):
+    """Coerce a value to float for a numeric column (YTM, Face Value, etc).
+    Several source APIs quote numbers as JSON strings (e.g. Smest's
+    sell_yield, GoldenPi's stagFaceValue) rather than returning them as
+    literal numbers, and mixing those raw strings with other platforms'
+    real floats in the same DataFrame column breaks Arrow serialization
+    for Streamlit's st.dataframe. Route every numeric field through this
+    so the column stays a clean float64 regardless of source quirks."""
+    if value is None or value == "":
+        return ""
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        return float(str(value).strip())
+    except (TypeError, ValueError):
+        return ""
+
+
 COLUMNS = [
     "OBPP",
     "ISIN",
@@ -71,11 +90,11 @@ def fetch_aspero():
                 "OBPP": "Aspero",
                 "ISIN": item.get("isin"),
                 "Issuer": item.get("name"),
-                "YTM (%)": item.get("listed_yield"),
+                "YTM (%)": to_float(item.get("listed_yield")),
                 "Rating": item.get("credit_rating"),
                 "Tenure (Months)": tenure_months,
-                "Face Value": item.get("face_value"),
-                "Minimum Investment Amount": item.get("min_investment"),
+                "Face Value": to_float(item.get("face_value")),
+                "Minimum Investment Amount": to_float(item.get("min_investment")),
             })
         print(f"Aspero: {len(rows)} rows")
     except requests.exceptions.RequestException as e:
@@ -142,11 +161,11 @@ def fetch_smest():
                 "OBPP": "Smest",
                 "ISIN": item.get("isin"),
                 "Issuer": clean_smest_issuer(item.get("security_name")),
-                "YTM (%)": item.get("sell_yield"),
+                "YTM (%)": to_float(item.get("sell_yield")),
                 "Rating": parse_smest_rating(item.get("ratings_org_name")),
                 "Tenure (Months)": tenure_months,
                 "Face Value": "",
-                "Minimum Investment Amount": item.get("minimum_quantity"),
+                "Minimum Investment Amount": to_float(item.get("minimum_quantity")),
             })
         print(f"Smest: {len(rows)} rows")
     except requests.exceptions.RequestException as e:
@@ -178,11 +197,11 @@ def fetch_wintwealth():
                 "OBPP": "Wintwealth",
                 "ISIN": item.get("isin"),
                 "Issuer": item.get("entityDisplayName") or item.get("productName", ""),
-                "YTM (%)": item.get("targetXirr") or item.get("interestRate"),
+                "YTM (%)": to_float(item.get("targetXirr") or item.get("interestRate")),
                 "Rating": item.get("bondRating", ""),
                 "Tenure (Months)": tenure_months,
-                "Face Value": item.get("issuePrice"),
-                "Minimum Investment Amount": min_investment,
+                "Face Value": to_float(item.get("issuePrice")),
+                "Minimum Investment Amount": to_float(min_investment),
             })
         print(f"Wintwealth: {len(rows)} rows")
     except requests.exceptions.RequestException as e:
@@ -214,11 +233,11 @@ def fetch_altifi():
                 "OBPP": "Altifi",
                 "ISIN": item.get("isinId", ""),
                 "Issuer": item.get("instrumentName", ""),
-                "YTM (%)": item.get("yield", ""),
+                "YTM (%)": to_float(item.get("yield", "")),
                 "Rating": item.get("rating", ""),
                 "Tenure (Months)": tenure_months,
                 "Face Value": "",
-                "Minimum Investment Amount": item.get("investmentAmount", ""),
+                "Minimum Investment Amount": to_float(item.get("investmentAmount", "")),
             })
         print(f"Altifi: {len(rows)} rows")
     except requests.exceptions.RequestException as e:
@@ -389,19 +408,15 @@ def fetch_indiabonds():
                     face_value = ""
 
             yield_str = (item.get("yield_value", "") or "").replace("%", "").strip()
-            try:
-                yield_val = float(yield_str) if yield_str else ""
-            except ValueError:
-                yield_val = ""
             rows.append({
                 "OBPP": "IndiaBonds",
                 "ISIN": isin,
                 "Issuer": item.get("issuer_name", ""),
-                "YTM (%)": yield_val,
+                "YTM (%)": to_float(yield_str),
                 "Rating": item.get("rating", ""),
                 "Tenure (Months)": tenure_months,
-                "Face Value": face_value,
-                "Minimum Investment Amount": item.get("price", ""),
+                "Face Value": to_float(face_value),
+                "Minimum Investment Amount": to_float(item.get("price", "")),
             })
         print(f"IndiaBonds: {len(rows)} rows")
     except requests.exceptions.RequestException as e:
@@ -449,11 +464,11 @@ def fetch_bondsindia():
                 "OBPP": "BondsIndia",
                 "ISIN": item.get("Security_Id", ""),
                 "Issuer": item.get("Issuer_Name", ""),
-                "YTM (%)": item.get("YTM", ""),
+                "YTM (%)": to_float(item.get("YTM", "")),
                 "Rating": item.get("Rating", ""),
                 "Tenure (Months)": item.get("Maturity_IN_MONTH", ""),
-                "Face Value": item.get("Face_Value", ""),
-                "Minimum Investment Amount": item.get("t0_min_investment", ""),
+                "Face Value": to_float(item.get("Face_Value", "")),
+                "Minimum Investment Amount": to_float(item.get("t0_min_investment", "")),
             })
         print(f"BondsIndia: {len(rows)} rows")
     except (requests.exceptions.RequestException, KeyError, ValueError) as e:
@@ -490,20 +505,15 @@ def fetch_jiraaf():
             for item in items:
                 total_days = item.get("total_days")
                 tenure_months = round(total_days / 30.44) if total_days else ""
-                irr = item.get("displayIRR")
-                try:
-                    irr = float(irr) if irr not in (None, "") else ""
-                except (TypeError, ValueError):
-                    pass
                 rows.append({
                     "OBPP": "Jiraaf",
                     "ISIN": item.get("isin", ""),
                     "Issuer": item.get("title", ""),
-                    "YTM (%)": irr,
+                    "YTM (%)": to_float(item.get("displayIRR")),
                     "Rating": item.get("riskRating", ""),
                     "Tenure (Months)": tenure_months,
                     "Face Value": "",
-                    "Minimum Investment Amount": item.get("minInvestmentAmount", ""),
+                    "Minimum Investment Amount": to_float(item.get("minInvestmentAmount", "")),
                 })
             page += 1
         print(f"Jiraaf: {len(rows)} rows")
@@ -596,20 +606,15 @@ def fetch_goldenpi():
             ytm = item.get("ytm")
             if ytm is None:
                 ytm = item.get("ytmc")
-            face_value = item.get("stagFaceValue")
-            try:
-                face_value = float(face_value) if face_value not in (None, "") else ""
-            except (TypeError, ValueError):
-                face_value = ""
             rows.append({
                 "OBPP": "GoldenPi",
                 "ISIN": item.get("isin") or "",
                 "Issuer": item.get("name", ""),
-                "YTM (%)": ytm,
+                "YTM (%)": to_float(ytm),
                 "Rating": extract_goldenpi_rating(item.get("sortedCreditRating")),
                 "Tenure (Months)": item.get("tenureMonth", ""),
-                "Face Value": face_value,
-                "Minimum Investment Amount": item.get("settlementAmount", ""),
+                "Face Value": to_float(item.get("stagFaceValue")),
+                "Minimum Investment Amount": to_float(item.get("settlementAmount", "")),
             })
         print(f"GoldenPi: {len(rows)} rows")
     except Exception as e:
@@ -791,11 +796,11 @@ def fetch_thefixedincome():
                     "OBPP": "TheFixedIncome",
                     "ISIN": isin,
                     "Issuer": issuer or clean_fallback,
-                    "YTM (%)": c["ytm"],
+                    "YTM (%)": to_float(c["ytm"]),
                     "Rating": c["rating"],
                     "Tenure (Months)": c["tenure_months"],
-                    "Face Value": face_value,
-                    "Minimum Investment Amount": c["min_investment"],
+                    "Face Value": to_float(face_value),
+                    "Minimum Investment Amount": to_float(c["min_investment"]),
                 })
             browser.close()
         print(f"TheFixedIncome: {len(rows)} rows")
@@ -848,11 +853,11 @@ def fetch_stable():
                 "OBPP": "Stable",
                 "ISIN": isin,
                 "Issuer": extract_clean_issuer(big_window),
-                "YTM (%)": ytm,
+                "YTM (%)": to_float(ytm),
                 "Rating": extract_rating(big_window),
                 "Tenure (Months)": extract_tenure_months(small_window),
-                "Face Value": extract_face_value(small_window),
-                "Minimum Investment Amount": min_investment,
+                "Face Value": to_float(extract_face_value(small_window)),
+                "Minimum Investment Amount": to_float(min_investment),
             })
         print(f"Stable: {len(rows)} rows")
     except requests.exceptions.RequestException as e:
