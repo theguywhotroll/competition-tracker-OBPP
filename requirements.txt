@@ -1,8 +1,0 @@
-streamlit
-requests
-pandas
-python-dateutil
-pytz
-openpyxl
-beautifulsoup4
-playwright
