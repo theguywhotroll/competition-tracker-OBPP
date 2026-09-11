@@ -1,3 +1,4 @@
+import json
 import re
 import struct
 import subprocess
@@ -527,6 +528,77 @@ def fetch_jiraaf():
 
 
 # ---------------------------------------------------------------------------
+# Bidd (InCred Money)
+# ---------------------------------------------------------------------------
+def fetch_bidd():
+    url = "https://api.biddeasy.com/orobonds/bonds/"
+    headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+    rows = []
+    try:
+        resp = requests.get(url, params={"payload1": ""}, headers=headers, timeout=30)
+        resp.raise_for_status()
+        items = resp.json().get("data", [])
+        for item in items:
+            # "category" also includes stale/sold-out "historical" entries and
+            # a few obvious test rows; "live" is what's actually on offer.
+            if item.get("category") != "live":
+                continue
+            rating_m = RATING_TOKEN_RE.search(item.get("rating") or "")
+            rows.append({
+                "OBPP": "Bidd",
+                "ISIN": item.get("ISIN", ""),
+                "Issuer": item.get("issuer", ""),
+                "YTM (%)": to_float(item.get("xirr")),
+                "Rating": rating_m.group(1).upper() if rating_m else "",
+                "Tenure (Months)": item.get("minTenure"),
+                "Face Value": to_float(item.get("faceValue")),
+                "Minimum Investment Amount": to_float(item.get("minAmt")),
+            })
+        print(f"Bidd: {len(rows)} rows")
+    except requests.exceptions.RequestException as e:
+        print(f"Error fetching Bidd data: {e}")
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# Bondskart
+# ---------------------------------------------------------------------------
+def fetch_bondskart():
+    url = "https://api.bondskart.com/ge/Filter"
+    headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+    rows = []
+    try:
+        filter_payload = json.dumps({
+            "sortDirection": "descending", "criteria": [], "onKind": "Security", "sortBy": "Yield",
+        })
+        resp = requests.get(
+            url, params={"filter": filter_payload, "offset": 0, "limit": 100}, headers=headers, timeout=30
+        )
+        resp.raise_for_status()
+        results = resp.json().get("response", {}).get("results", [])
+        for item in results:
+            credit_ratings = item.get("creditRatings") or []
+            rating = credit_ratings[0].get("rating", "") if credit_ratings else ""
+            tenure_days = item.get("maturityTenureInDays")
+            tenure_months = round(tenure_days / 30.44) if tenure_days else None
+            ytm = item.get("ytm")
+            rows.append({
+                "OBPP": "Bondskart",
+                "ISIN": item.get("isin", ""),
+                "Issuer": (item.get("issuer") or {}).get("name", ""),
+                "YTM (%)": to_float(ytm * 100) if ytm is not None else None,
+                "Rating": rating,
+                "Tenure (Months)": tenure_months,
+                "Face Value": None,
+                "Minimum Investment Amount": to_float(item.get("minimumInvestment")),
+            })
+        print(f"Bondskart: {len(rows)} rows")
+    except requests.exceptions.RequestException as e:
+        print(f"Error fetching Bondskart data: {e}")
+    return rows
+
+
+# ---------------------------------------------------------------------------
 # GoldenPi (API requires an x-gpi-client-token that's generated client-side
 # and validated server-side by means we couldn't replicate directly, so we
 # load the site in a real browser and let its own JS mint a valid token)
@@ -882,6 +954,8 @@ FETCHERS = {
     "IndiaBonds": fetch_indiabonds,
     "BondsIndia": fetch_bondsindia,
     "Jiraaf": fetch_jiraaf,
+    "Bidd": fetch_bidd,
+    "Bondskart": fetch_bondskart,
     "GoldenPi": fetch_goldenpi,
     "TheFixedIncome": fetch_thefixedincome,
 }
@@ -904,9 +978,11 @@ CONFIDENCE = {
     "Aspero": ("High", "Official JSON API; every field (incl. Face Value, Min Investment) is a direct field."),
     "Wintwealth": ("High", "Official JSON API; every field is direct or a one-line computation from direct fields."),
     "Altifi": ("High", "Official JSON API; direct fields. Face Value isn't exposed by their API, so it's left blank rather than guessed."),
-    "BondsIndia": ("High", "Official JSON API; every field, including Face Value and Min Investment, is a direct field."),
+    "BondsIndia": ("Reverify", "BROKEN as of Sep 2026: the site rebranded to digifinn.com and now encrypts its API payloads (AES, confirmed via the OpenSSL 'Salted__' header). Not fetchable without decrypting their scheme, which we won't do. Always returns 0 rows."),
     "Jiraaf": ("High", "Public JSON API; every field is direct except Tenure (computed from their own total_days field). Face Value isn't exposed, left blank."),
     "GoldenPi": ("High", "Direct JSON fields via a browser-minted auth token. YTM falls back to their indicative ytmc field for a few not-yet-listed IPO tranches."),
+    "Bidd": ("High", "Official JSON API (InCred Money); every field is direct. Filtered to their 'live' category to exclude stale/sold-out/test entries mixed into the raw feed."),
+    "Bondskart": ("High", "Official JSON API; every field is direct except Tenure (computed from their own maturityTenureInDays field). Face Value isn't exposed, left blank."),
     "IndiaBonds": ("Good", "Direct fields, but Face Value needs a second per-ISIN call, and Minimum Investment relies on their `price` field being verified equal to total settlement amount (checked on a few bonds, not all)."),
     "Smest": ("Good", "ISIN/YTM are direct; Issuer and Rating are parsed out of compound text fields. Minimum Investment uses their `minimum_quantity` field as-is, unverified. Bonds with tenure over 36 months are filtered out entirely."),
     "Stable": ("Reverify", "Their API returns undocumented raw binary with no public schema — every field is reverse-engineered from byte patterns. Spot-checked exact on 3 live bonds, but Rating/Tenure are blank on a handful of rows, and an upstream format change could silently break this."),
