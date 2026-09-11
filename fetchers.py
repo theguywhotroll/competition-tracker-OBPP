@@ -644,36 +644,57 @@ def fetch_inrbonds():
 # Grip (your own live deals, pulled from a Metabase question export, so it
 # slots into the same table/filters/comparisons as every OBPP above)
 # ---------------------------------------------------------------------------
+def _normalize_grip_key(name):
+    """Collapse a column name to just its letters/digits so 'live_status',
+    'Live Status' and 'LiveStatus' all compare equal -- Metabase's public CSV
+    export renders "friendly" Title Case headers instead of the raw DB column
+    names the local Metabase export used, so a straight dict lookup on the
+    snake_case key silently matches nothing."""
+    return re.sub(r"[^a-z0-9]", "", str(name).lower())
+
+
+def _build_grip_column_map(raw_df):
+    return {_normalize_grip_key(col): col for col in raw_df.columns}
+
+
 def _parse_grip_deals_df(raw_df):
+    col_map = _build_grip_column_map(raw_df)
+
+    def get(row, expected_key, default=""):
+        actual_col = col_map.get(_normalize_grip_key(expected_key))
+        if actual_col is None:
+            return default
+        return row.get(actual_col, default)
+
     rows = []
     for _, r in raw_df.iterrows():
-        if str(r.get("live_status", "")).strip().upper() != "TRUE":
+        if str(get(r, "live_status")).strip().upper() != "TRUE":
             continue
         # Baskets/FDs/SDIs aren't individual ISIN-level bonds comparable to
         # the OBPP listings above; "Bonds" already covers NCDs, G-Secs and
         # T-Bills in Grip's own taxonomy.
-        if str(r.get("finance_product_type", "")).strip() != "Bonds":
+        if str(get(r, "finance_product_type")).strip() != "Bonds":
             continue
-        isin = str(r.get("isin_number", "")).strip()
+        isin = str(get(r, "isin_number")).strip()
         if not isin or isin.upper() == "NA" or isin.lower() == "nan":
             continue
 
-        unit_price_raw = r.get("unit_price")
+        unit_price_raw = get(r, "unit_price", None)
         unit_price = None
         if pd.notna(unit_price_raw):
             unit_price = to_float(str(unit_price_raw).replace(",", ""))
 
-        rating = r.get("rating")
+        rating = get(r, "rating", None)
         rating = "" if pd.isna(rating) else str(rating).strip()
 
         rows.append({
             "OBPP": "Grip",
             "ISIN": isin,
-            "Issuer": str(r.get("asset_desc", "")).strip(),
-            "YTM (%)": to_float(r.get("irr")),
+            "Issuer": str(get(r, "asset_desc")).strip(),
+            "YTM (%)": to_float(get(r, "irr", None)),
             "Rating": rating,
-            "Tenure (Months)": to_float(r.get("tenure")),
-            "Face Value": to_float(r.get("face_value")),
+            "Tenure (Months)": to_float(get(r, "tenure", None)),
+            "Face Value": to_float(get(r, "face_value", None)),
             "Minimum Investment Amount": unit_price,
         })
     return rows
@@ -723,10 +744,20 @@ def fetch_grip_deals():
         rows = _parse_grip_deals_df(raw_df)
         print(f"Grip: {len(rows)} rows")
         if not rows:
-            GRIP_LAST_ERROR = (
-                f"Fetched {len(raw_df)} row(s) from {csv_url} but none matched "
-                "(live_status == TRUE and finance_product_type == 'Bonds'). Check the export isn't filtered/empty."
-            )
+            col_map = _build_grip_column_map(raw_df)
+            required = ["live_status", "finance_product_type", "isin_number"]
+            unmatched = [key for key in required if _normalize_grip_key(key) not in col_map]
+            if unmatched:
+                GRIP_LAST_ERROR = (
+                    f"Fetched {len(raw_df)} row(s) from {csv_url} but couldn't find a column for "
+                    f"{', '.join(unmatched)} among the export's columns: {list(raw_df.columns)}"
+                )
+            else:
+                GRIP_LAST_ERROR = (
+                    f"Fetched {len(raw_df)} row(s) from {csv_url} but none matched "
+                    "(live_status == TRUE and finance_product_type == 'Bonds'). Check the export isn't filtered/empty. "
+                    f"Export columns: {list(raw_df.columns)}"
+                )
     except Exception as e:
         GRIP_LAST_ERROR = f"{type(e).__name__}: {e}"
         print(f"Error fetching Grip deals: {e}")
