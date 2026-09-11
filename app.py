@@ -18,6 +18,10 @@ if "last_fetched" not in st.session_state:
     st.session_state.last_fetched = None
 if "fetch_summary" not in st.session_state:
     st.session_state.fetch_summary = {}
+if "data_source" not in st.session_state:
+    st.session_state.data_source = None
+if "last_upload_signature" not in st.session_state:
+    st.session_state.last_upload_signature = None
 
 st.title("Bond Competition Tracker")
 st.caption(
@@ -43,9 +47,38 @@ with st.sidebar:
     fetch_clicked = st.button("Fetch Latest Data", type="primary", use_container_width=True)
 
     if st.session_state.last_fetched:
-        st.caption(f"Last fetched: {st.session_state.last_fetched.strftime('%Y-%m-%d %H:%M:%S')}")
+        label = st.session_state.data_source or "Fetched live"
+        st.caption(f"{label} — {st.session_state.last_fetched.strftime('%Y-%m-%d %H:%M:%S')}")
     else:
-        st.caption("No data fetched yet.")
+        st.caption("No data loaded yet.")
+
+    st.divider()
+    st.subheader("Or load a local export")
+    st.caption(
+        "Some platforms (IndiaBonds, GoldenPi, TheFixedIncome) can be blocked when "
+        "fetched from this Cloud deployment but work when run locally. Run "
+        "`consolidated_tracker.py` on your own machine and upload its `.xlsx` output "
+        "here to visualize the full dataset the same way."
+    )
+    uploaded_file = st.file_uploader("Upload consolidated_tracker.xlsx", type=["xlsx"])
+    if uploaded_file is not None:
+        upload_signature = f"{uploaded_file.name}-{uploaded_file.size}"
+        if st.session_state.last_upload_signature != upload_signature:
+            try:
+                uploaded_df = pd.read_excel(uploaded_file)
+                required_cols = [c for c in COLUMNS if c != "OBPP"] + ["OBPP"]
+                missing = [c for c in required_cols if c not in uploaded_df.columns]
+                if missing:
+                    st.error(f"This file is missing expected column(s): {', '.join(missing)}")
+                else:
+                    st.session_state.data = uploaded_df
+                    st.session_state.last_fetched = datetime.now()
+                    st.session_state.data_source = f"Uploaded: {uploaded_file.name}"
+                    st.session_state.fetch_summary = {}
+                    st.session_state.last_upload_signature = upload_signature
+                    st.rerun()
+            except Exception as e:
+                st.error(f"Couldn't read that file: {e}")
 
     if st.session_state.fetch_summary:
         st.divider()
@@ -95,6 +128,7 @@ if fetch_clicked:
         df = pd.DataFrame(all_rows, columns=COLUMNS)
         st.session_state.data = df
         st.session_state.last_fetched = datetime.now()
+        st.session_state.data_source = "Fetched live"
         st.session_state.fetch_summary = summary
         status_box.update(label=f"Done — {len(df)} bonds from {len(selected_platforms)} platform(s)", state="complete")
         st.rerun()
@@ -105,7 +139,10 @@ if fetch_clicked:
 df = st.session_state.data
 
 if df is None or df.empty:
-    st.info("Click **Fetch Latest Data** in the sidebar to load bond listings from all platforms.")
+    st.info(
+        "Click **Fetch Latest Data** in the sidebar to load bond listings from all platforms, "
+        "or upload a `.xlsx` file exported by the local script."
+    )
     st.stop()
 
 if "Confidence" not in df.columns:
@@ -165,7 +202,7 @@ with f1:
     search = st.text_input("Search Issuer / ISIN")
 
 with f2:
-    ratings = sorted(r for r in df["Rating"].astype(str).unique() if r and r != "nan")
+    ratings = sorted(r for r in df["Rating"].dropna().astype(str).unique() if r and r.lower() != "nan")
     rating_filter = st.multiselect("Rating", options=ratings, default=ratings)
     include_blank_rating = st.checkbox("Include bonds with no rating on file", value=True)
 
@@ -189,7 +226,7 @@ mask = df["OBPP"].isin(obpp_filter) & df["Confidence"].isin(confidence_filter)
 
 rating_mask = df["Rating"].astype(str).isin(rating_filter)
 if include_blank_rating:
-    rating_mask |= df["Rating"].astype(str).isin(["", "nan", "None"])
+    rating_mask |= df["Rating"].isna() | df["Rating"].astype(str).isin(["", "nan", "None"])
 mask &= rating_mask
 
 if ytm_range:
