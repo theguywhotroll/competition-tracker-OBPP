@@ -36,18 +36,20 @@ def to_float(value):
     """Coerce a value to float for a numeric column (YTM, Face Value, etc).
     Several source APIs quote numbers as JSON strings (e.g. Smest's
     sell_yield, GoldenPi's stagFaceValue) rather than returning them as
-    literal numbers, and mixing those raw strings with other platforms'
-    real floats in the same DataFrame column breaks Arrow serialization
-    for Streamlit's st.dataframe. Route every numeric field through this
-    so the column stays a clean float64 regardless of source quirks."""
+    literal numbers, and mixing those raw strings -- or a blank "" -- with
+    other platforms' real floats in the same DataFrame column breaks Arrow
+    serialization for Streamlit's st.dataframe. Route every numeric field
+    through this so the column stays a clean float64/NaN regardless of
+    source quirks; a missing value becomes None (a true null), never "".
+    """
     if value is None or value == "":
-        return ""
+        return None
     if isinstance(value, (int, float)):
         return float(value)
     try:
         return float(str(value).strip())
     except (TypeError, ValueError):
-        return ""
+        return None
 
 
 COLUMNS = [
@@ -80,7 +82,7 @@ def fetch_aspero():
         items = resp.json().get("items", [])
         now = datetime.now()
         for item in items:
-            tenure_months = ""
+            tenure_months = None
             maturity_date = item.get("maturity_date")
             if maturity_date:
                 m = datetime.strptime(maturity_date, "%Y-%m-%d")
@@ -164,7 +166,7 @@ def fetch_smest():
                 "YTM (%)": to_float(item.get("sell_yield")),
                 "Rating": parse_smest_rating(item.get("ratings_org_name")),
                 "Tenure (Months)": tenure_months,
-                "Face Value": "",
+                "Face Value": None,
                 "Minimum Investment Amount": to_float(item.get("minimum_quantity")),
             })
         print(f"Smest: {len(rows)} rows")
@@ -184,7 +186,7 @@ def fetch_wintwealth():
         resp = requests.get(url, timeout=30)
         resp.raise_for_status()
         for item in resp.json().get("CURRENT", []):
-            tenure_months = ""
+            tenure_months = None
             maturity_date = item.get("maturityDate")
             if maturity_date:
                 m = datetime.strptime(maturity_date, "%Y-%m-%d")
@@ -228,7 +230,7 @@ def fetch_altifi():
         resp.raise_for_status()
         for item in resp.json().get("content", []):
             maturity_date_str = item.get("maturityDate", "")
-            tenure_months = months_left(maturity_date_str) if maturity_date_str else ""
+            tenure_months = months_left(maturity_date_str) if maturity_date_str else None
             rows.append({
                 "OBPP": "Altifi",
                 "ISIN": item.get("isinId", ""),
@@ -236,7 +238,7 @@ def fetch_altifi():
                 "YTM (%)": to_float(item.get("yield", "")),
                 "Rating": item.get("rating", ""),
                 "Tenure (Months)": tenure_months,
-                "Face Value": "",
+                "Face Value": None,
                 "Minimum Investment Amount": to_float(item.get("investmentAmount", "")),
             })
         print(f"Altifi: {len(rows)} rows")
@@ -283,7 +285,7 @@ def clean_text(text: str) -> str:
 def parse_tenure_to_months(text: str):
     m = re.search(r"(?:(\d+)\s*Y)?\s*(?:(\d+)\s*M)?\s*(?:(\d+)\s*D)?", text, re.I)
     if not m:
-        return ""
+        return None
     years = int(m.group(1)) if m.group(1) else 0
     months = int(m.group(2)) if m.group(2) else 0
     return years * 12 + months
@@ -316,7 +318,7 @@ def extract_face_value(window: str):
 
 def extract_tenure_months(window: str):
     m = TENURE_RE.search(window)
-    return parse_tenure_to_months(m.group(1)) if m else ""
+    return parse_tenure_to_months(m.group(1)) if m else None
 
 
 def extract_ytm_and_min_investment(block: bytes):
@@ -389,7 +391,7 @@ def fetch_indiabonds():
 
         for item in bond_list:
             isin = item.get("isin", "")
-            tenure_months = ""
+            tenure_months = None
             maturity_date = item.get("maturity_date")
             if maturity_date:
                 m = datetime.strptime(maturity_date, "%d %b %Y")
@@ -466,12 +468,14 @@ def fetch_bondsindia():
                 "Issuer": item.get("Issuer_Name", ""),
                 "YTM (%)": to_float(item.get("YTM", "")),
                 "Rating": item.get("Rating", ""),
-                "Tenure (Months)": item.get("Maturity_IN_MONTH", ""),
+                "Tenure (Months)": item.get("Maturity_IN_MONTH"),
                 "Face Value": to_float(item.get("Face_Value", "")),
                 "Minimum Investment Amount": to_float(item.get("t0_min_investment", "")),
             })
         print(f"BondsIndia: {len(rows)} rows")
     except (requests.exceptions.RequestException, KeyError, ValueError) as e:
+        import traceback
+        traceback.print_exc()
         print(f"Error fetching BondsIndia data: {e}")
     return rows
 
@@ -504,7 +508,7 @@ def fetch_jiraaf():
 
             for item in items:
                 total_days = item.get("total_days")
-                tenure_months = round(total_days / 30.44) if total_days else ""
+                tenure_months = round(total_days / 30.44) if total_days else None
                 rows.append({
                     "OBPP": "Jiraaf",
                     "ISIN": item.get("isin", ""),
@@ -512,7 +516,7 @@ def fetch_jiraaf():
                     "YTM (%)": to_float(item.get("displayIRR")),
                     "Rating": item.get("riskRating", ""),
                     "Tenure (Months)": tenure_months,
-                    "Face Value": "",
+                    "Face Value": None,
                     "Minimum Investment Amount": to_float(item.get("minInvestmentAmount", "")),
                 })
             page += 1
@@ -612,7 +616,7 @@ def fetch_goldenpi():
                 "Issuer": item.get("name", ""),
                 "YTM (%)": to_float(ytm),
                 "Rating": extract_goldenpi_rating(item.get("sortedCreditRating")),
-                "Tenure (Months)": item.get("tenureMonth", ""),
+                "Tenure (Months)": item.get("tenureMonth"),
                 "Face Value": to_float(item.get("stagFaceValue")),
                 "Minimum Investment Amount": to_float(item.get("settlementAmount", "")),
             })
@@ -653,7 +657,7 @@ async (urls) => {
 def parse_tfi_ymd_tenure(text):
     m = re.search(r"(?:(\d+)\s*y)?\s*(?:(\d+)\s*m)?\s*(?:(\d+)\s*d)?", text, re.I)
     if not m:
-        return ""
+        return None
     years = int(m.group(1)) if m.group(1) else 0
     months = int(m.group(2)) if m.group(2) else 0
     return years * 12 + months
