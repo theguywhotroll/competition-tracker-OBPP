@@ -1,4 +1,6 @@
+import io
 import json
+import os
 import re
 import struct
 import subprocess
@@ -6,6 +8,7 @@ import sys
 import time
 from datetime import datetime
 
+import pandas as pd
 import pytz
 import requests
 from dateutil.relativedelta import relativedelta
@@ -599,6 +602,173 @@ def fetch_bondskart():
 
 
 # ---------------------------------------------------------------------------
+# INRBonds (institutional-facing platform; separate bondType per call)
+# ---------------------------------------------------------------------------
+def fetch_inrbonds():
+    url = "https://www.inrbonds.com/api/info/getBonds"
+    headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json", "Content-Type": "application/json"}
+    rows = []
+    try:
+        for bond_type in ("corporate", "gsec"):
+            resp = requests.post(url, json={"filters": {"sort": ""}, "bondType": bond_type}, headers=headers, timeout=30)
+            resp.raise_for_status()
+            for item in resp.json():
+                best_offer = item.get("bestOffer") or {}
+                ytm_str = (best_offer.get("ytm") or "").replace("%", "").strip()
+                tenor_years = item.get("tenor")
+                tenure_months = round(tenor_years * 12) if tenor_years is not None else None
+                face_value = to_float(item.get("faceValue"))
+                price_per_hundred = to_float(best_offer.get("pricePerHundred"))
+                min_investment = (
+                    round(face_value * price_per_hundred / 100, 2)
+                    if face_value is not None and price_per_hundred is not None
+                    else None
+                )
+                rows.append({
+                    "OBPP": "INRBonds",
+                    "ISIN": item.get("isinNo", ""),
+                    "Issuer": item.get("nameOfIssuer", ""),
+                    "YTM (%)": to_float(ytm_str),
+                    "Rating": item.get("creditRating", ""),
+                    "Tenure (Months)": tenure_months,
+                    "Face Value": face_value,
+                    "Minimum Investment Amount": min_investment,
+                })
+        print(f"INRBonds: {len(rows)} rows")
+    except requests.exceptions.RequestException as e:
+        print(f"Error fetching INRBonds data: {e}")
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# Grip (your own live deals, pulled from a Metabase question export, so it
+# slots into the same table/filters/comparisons as every OBPP above)
+# ---------------------------------------------------------------------------
+def _parse_grip_deals_df(raw_df):
+    rows = []
+    for _, r in raw_df.iterrows():
+        if str(r.get("live_status", "")).strip().upper() != "TRUE":
+            continue
+        # Baskets/FDs/SDIs aren't individual ISIN-level bonds comparable to
+        # the OBPP listings above; "Bonds" already covers NCDs, G-Secs and
+        # T-Bills in Grip's own taxonomy.
+        if str(r.get("finance_product_type", "")).strip() != "Bonds":
+            continue
+        isin = str(r.get("isin_number", "")).strip()
+        if not isin or isin.upper() == "NA" or isin.lower() == "nan":
+            continue
+
+        unit_price_raw = r.get("unit_price")
+        unit_price = None
+        if pd.notna(unit_price_raw):
+            unit_price = to_float(str(unit_price_raw).replace(",", ""))
+
+        rating = r.get("rating")
+        rating = "" if pd.isna(rating) else str(rating).strip()
+
+        rows.append({
+            "OBPP": "Grip",
+            "ISIN": isin,
+            "Issuer": str(r.get("asset_desc", "")).strip(),
+            "YTM (%)": to_float(r.get("irr")),
+            "Rating": rating,
+            "Tenure (Months)": to_float(r.get("tenure")),
+            "Face Value": to_float(r.get("face_value")),
+            "Minimum Investment Amount": unit_price,
+        })
+    return rows
+
+
+def parse_grip_csv_upload(uploaded_file):
+    """Used by the sidebar's manual CSV upload path (bypasses the Metabase URL)."""
+    raw_df = pd.read_csv(uploaded_file)
+    return _parse_grip_deals_df(raw_df)
+
+
+def fetch_grip_deals():
+    rows = []
+    url = ""
+    try:
+        import streamlit as st
+        url = (st.secrets.get("GRIP_METABASE_URL", "") or "").strip()
+    except Exception:
+        url = os.environ.get("GRIP_METABASE_URL", "").strip()
+
+    if not url:
+        print("Skipping Grip: set GRIP_METABASE_URL in Streamlit secrets, or upload the CSV manually.")
+        return rows
+
+    try:
+        csv_url = url if url.lower().endswith(".csv") else url.rstrip("/") + ".csv"
+        resp = requests.get(csv_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=30)
+        resp.raise_for_status()
+        raw_df = pd.read_csv(io.StringIO(resp.text))
+        rows = _parse_grip_deals_df(raw_df)
+        print(f"Grip: {len(rows)} rows")
+    except Exception as e:
+        print(f"Error fetching Grip deals: {e}")
+    return rows
+
+
+def build_grip_comparison(df):
+    """Head-to-head comparison of Grip's live book against every other
+    platform's, matched by ISIN. Returns None if either side has no data."""
+    if "Grip" not in df["OBPP"].unique():
+        return None
+
+    grip_df = df[df["OBPP"] == "Grip"].copy()
+    obpp_df = df[df["OBPP"] != "Grip"].copy()
+    if grip_df.empty or obpp_df.empty:
+        return None
+
+    grip_df["YTM (%)"] = pd.to_numeric(grip_df["YTM (%)"], errors="coerce")
+    obpp_df["YTM (%)"] = pd.to_numeric(obpp_df["YTM (%)"], errors="coerce")
+
+    grip_best = (
+        grip_df.sort_values("YTM (%)", ascending=False)
+        .groupby("ISIN", as_index=False)
+        .first()[["ISIN", "Issuer", "YTM (%)", "Rating", "Tenure (Months)"]]
+        .rename(columns={"YTM (%)": "Grip YTM (%)", "Rating": "Grip Rating", "Tenure (Months)": "Grip Tenure (Months)"})
+    )
+    obpp_best = (
+        obpp_df.sort_values("YTM (%)", ascending=False)
+        .groupby("ISIN", as_index=False)
+        .first()[["ISIN", "OBPP", "YTM (%)", "Rating", "Tenure (Months)"]]
+        .rename(columns={
+            "OBPP": "Best OBPP", "YTM (%)": "Best OBPP YTM (%)",
+            "Rating": "OBPP Rating", "Tenure (Months)": "OBPP Tenure (Months)",
+        })
+    )
+
+    matched = grip_best.merge(obpp_best, on="ISIN", how="inner")
+    matched["YTM Delta (Grip - OBPP)"] = matched["Grip YTM (%)"] - matched["Best OBPP YTM (%)"]
+    matched = matched.sort_values("YTM Delta (Grip - OBPP)", ascending=False)
+
+    grip_only = grip_best[~grip_best["ISIN"].isin(obpp_best["ISIN"])].sort_values("Grip YTM (%)", ascending=False)
+    obpp_only = obpp_best[~obpp_best["ISIN"].isin(grip_best["ISIN"])].sort_values("Best OBPP YTM (%)", ascending=False)
+
+    metrics = {
+        "Grip unique ISINs": grip_best["ISIN"].nunique(),
+        "OBPP unique ISINs (all competitors combined)": obpp_best["ISIN"].nunique(),
+        "Matched (same ISIN on both)": len(matched),
+        "Grip-only bonds": len(grip_only),
+        "OBPP-only bonds": len(obpp_only),
+        "Grip win rate on matches (YTM >= best competitor)": (
+            f"{(matched['YTM Delta (Grip - OBPP)'] >= 0).mean() * 100:.1f}%" if len(matched) else "n/a"
+        ),
+        "Avg YTM delta on matches (Grip - best competitor)": (
+            f"{matched['YTM Delta (Grip - OBPP)'].mean():.2f} pp" if len(matched) else "n/a"
+        ),
+        "Grip avg YTM (entire live book)": f"{grip_df['YTM (%)'].mean():.2f}%",
+        "OBPP avg YTM (all competitors combined)": f"{obpp_df['YTM (%)'].mean():.2f}%",
+        "Unique issuers on Grip": grip_df["Issuer"].nunique(),
+        "Unique issuers across OBPPs": obpp_df["Issuer"].nunique(),
+    }
+
+    return {"matched": matched, "grip_only": grip_only, "obpp_only": obpp_only, "metrics": metrics}
+
+
+# ---------------------------------------------------------------------------
 # GoldenPi (API requires an x-gpi-client-token that's generated client-side
 # and validated server-side by means we couldn't replicate directly, so we
 # load the site in a real browser and let its own JS mint a valid token)
@@ -956,8 +1126,10 @@ FETCHERS = {
     "Jiraaf": fetch_jiraaf,
     "Bidd": fetch_bidd,
     "Bondskart": fetch_bondskart,
+    "INRBonds": fetch_inrbonds,
     "GoldenPi": fetch_goldenpi,
     "TheFixedIncome": fetch_thefixedincome,
+    "Grip": fetch_grip_deals,
 }
 
 # ---------------------------------------------------------------------------
@@ -983,6 +1155,8 @@ CONFIDENCE = {
     "GoldenPi": ("High", "Direct JSON fields via a browser-minted auth token. YTM falls back to their indicative ytmc field for a few not-yet-listed IPO tranches."),
     "Bidd": ("High", "Official JSON API (InCred Money); every field is direct. Filtered to their 'live' category to exclude stale/sold-out/test entries mixed into the raw feed."),
     "Bondskart": ("High", "Official JSON API; every field is direct except Tenure (computed from their own maturityTenureInDays field). Face Value isn't exposed, left blank."),
+    "INRBonds": ("Good", "Official JSON API, direct fields, but a small institutional-facing book (~11 bonds). Minimum Investment is computed as Face Value × (price/100), not a field they expose directly."),
+    "Grip": ("Good", "Your own Metabase export of live deals; ISIN/YTM/Rating/Tenure are direct columns. Filtered to finance_product_type == 'Bonds' (excludes Baskets, FDs, SDIs) and live_status == TRUE. 'Issuer' is the export's deal label (e.g. 'Paisalo Feb'28'), not a clean legal issuer name -- the export has no separate issuer column."),
     "IndiaBonds": ("Good", "Direct fields, but Face Value needs a second per-ISIN call, and Minimum Investment relies on their `price` field being verified equal to total settlement amount (checked on a few bonds, not all)."),
     "Smest": ("Good", "ISIN/YTM are direct; Issuer and Rating are parsed out of compound text fields. Minimum Investment uses their `minimum_quantity` field as-is, unverified. Bonds with tenure over 36 months are filtered out entirely."),
     "Stable": ("Reverify", "Their API returns undocumented raw binary with no public schema — every field is reverse-engineered from byte patterns. Spot-checked exact on 3 live bonds, but Rating/Tenure are blank on a handful of rows, and an upstream format change could silently break this."),

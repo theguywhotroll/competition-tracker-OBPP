@@ -5,7 +5,7 @@ from datetime import datetime
 import pandas as pd
 import streamlit as st
 
-from fetchers import COLUMNS, CONFIDENCE, FETCHERS
+from fetchers import COLUMNS, CONFIDENCE, FETCHERS, build_grip_comparison, parse_grip_csv_upload
 
 CONFIDENCE_COLOR = {"High": "green", "Good": "orange", "Reverify": "red"}
 CONFIDENCE_ORDER = {"High": 0, "Good": 1, "Reverify": 2}
@@ -22,6 +22,8 @@ if "data_source" not in st.session_state:
     st.session_state.data_source = None
 if "last_upload_signature" not in st.session_state:
     st.session_state.last_upload_signature = None
+if "last_grip_upload_signature" not in st.session_state:
+    st.session_state.last_grip_upload_signature = None
 
 st.title("Bond Competition Tracker")
 st.caption(
@@ -41,7 +43,8 @@ with st.sidebar:
         options=platform_names,
         default=platform_names,
         help="TheFixedIncome uses a headless browser and is noticeably slower "
-        "than the others (it also rate-limits if fetched too frequently).",
+        "than the others (it also rate-limits if fetched too frequently). "
+        "Grip needs GRIP_METABASE_URL set in secrets, or upload its CSV below instead.",
     )
 
     fetch_clicked = st.button("Fetch Latest Data", type="primary", use_container_width=True)
@@ -80,12 +83,45 @@ with st.sidebar:
             except Exception as e:
                 st.error(f"Couldn't read that file: {e}")
 
+    st.divider()
+    st.subheader("Or upload Grip's live deals")
+    st.caption(
+        "'Grip' is already one of the platforms above and fetches automatically from "
+        "GRIP_METABASE_URL if that secret is set. Use this instead to refresh just "
+        "Grip's numbers without re-fetching every OBPP, or if the secret isn't set yet."
+    )
+    grip_csv_file = st.file_uploader("Upload the Metabase 'Platform Live Deals' CSV", type=["csv"])
+    if grip_csv_file is not None:
+        grip_signature = f"{grip_csv_file.name}-{grip_csv_file.size}"
+        if st.session_state.last_grip_upload_signature != grip_signature:
+            try:
+                grip_rows = parse_grip_csv_upload(grip_csv_file)
+                if not grip_rows:
+                    st.warning("No live 'Bonds' rows found in that CSV.")
+                else:
+                    base_df = st.session_state.data
+                    base_df = base_df[base_df["OBPP"] != "Grip"] if base_df is not None else pd.DataFrame(columns=COLUMNS)
+                    grip_df_new = pd.DataFrame(grip_rows, columns=COLUMNS)
+                    st.session_state.data = pd.concat([base_df, grip_df_new], ignore_index=True)
+                    if st.session_state.last_fetched is None:
+                        st.session_state.last_fetched = datetime.now()
+                        st.session_state.data_source = "Fetched live"
+                    st.session_state.last_grip_upload_signature = grip_signature
+                    st.rerun()
+            except Exception as e:
+                st.error(f"Couldn't read that CSV: {e}")
+
     if st.session_state.fetch_summary:
         st.divider()
         st.subheader("Last fetch summary")
         for platform, info in st.session_state.fetch_summary.items():
             if info["status"] == "ok":
                 st.write(f":green[✓] {platform}: {info['rows']} rows ({info['elapsed']:.1f}s)")
+            elif info["status"] == "empty" and platform == "Grip":
+                st.write(
+                    f":orange[⚠] {platform}: 0 rows — GRIP_METABASE_URL isn't set in secrets. "
+                    "Add it, or upload the CSV manually below instead."
+                )
             elif info["status"] == "empty":
                 st.write(
                     f":orange[⚠] {platform}: 0 rows ({info['elapsed']:.1f}s) — "
@@ -115,6 +151,9 @@ if fetch_clicked:
                 if rows:
                     summary[platform] = {"status": "ok", "rows": len(rows), "elapsed": elapsed}
                     status_box.write(f"✓ {platform}: {len(rows)} rows ({elapsed:.1f}s)")
+                elif platform == "Grip":
+                    summary[platform] = {"status": "empty", "rows": 0, "elapsed": elapsed}
+                    status_box.write(f"⚠ {platform}: 0 rows — GRIP_METABASE_URL isn't set in secrets")
                 else:
                     summary[platform] = {"status": "empty", "rows": 0, "elapsed": elapsed}
                     status_box.write(
@@ -188,6 +227,53 @@ with st.expander("Average YTM by platform"):
         .sort_values(ascending=False)
     )
     st.bar_chart(avg_ytm)
+
+comparison = build_grip_comparison(df)
+if comparison:
+    st.divider()
+    st.subheader("Grip vs Competition")
+    st.caption(
+        "Grip's live deals matched against every other platform's, by ISIN. "
+        "'Best OBPP' is whichever competitor offers the highest YTM on that exact bond."
+    )
+    m = comparison["metrics"]
+
+    mc1, mc2, mc3, mc4 = st.columns(4)
+    mc1.metric("Matched bonds (same ISIN)", m["Matched (same ISIN on both)"])
+    mc2.metric("Grip-only bonds", m["Grip-only bonds"])
+    mc3.metric("OBPP-only bonds", m["OBPP-only bonds"])
+    mc4.metric("Grip win rate on matches", m["Grip win rate on matches (YTM >= best competitor)"])
+
+    mc5, mc6, mc7, mc8 = st.columns(4)
+    mc5.metric("Avg YTM delta (Grip − best OBPP)", m["Avg YTM delta on matches (Grip - best competitor)"])
+    mc6.metric("Grip avg YTM (whole book)", m["Grip avg YTM (entire live book)"])
+    mc7.metric("OBPP avg YTM (all competitors)", m["OBPP avg YTM (all competitors combined)"])
+    mc8.metric("Issuer coverage (Grip vs OBPPs)", f"{m['Unique issuers on Grip']} / {m['Unique issuers across OBPPs']}")
+
+    tab1, tab2, tab3 = st.tabs(["Matched bonds (same ISIN)", "Grip-only bonds", "OBPP-only bonds"])
+    with tab1:
+        st.dataframe(comparison["matched"], use_container_width=True, height=350, hide_index=True)
+    with tab2:
+        st.dataframe(comparison["grip_only"], use_container_width=True, height=350, hide_index=True)
+    with tab3:
+        st.dataframe(comparison["obpp_only"], use_container_width=True, height=350, hide_index=True)
+
+    if not comparison["matched"].empty:
+        with st.expander("YTM delta by bond (matched, Grip − best OBPP)"):
+            st.bar_chart(comparison["matched"].set_index("ISIN")["YTM Delta (Grip - OBPP)"])
+
+    comparison_buffer = io.BytesIO()
+    with pd.ExcelWriter(comparison_buffer, engine="openpyxl") as writer:
+        comparison["matched"].to_excel(writer, index=False, sheet_name="Matched")
+        comparison["grip_only"].to_excel(writer, index=False, sheet_name="Grip only")
+        comparison["obpp_only"].to_excel(writer, index=False, sheet_name="OBPP only")
+        pd.DataFrame(list(m.items()), columns=["Metric", "Value"]).to_excel(writer, index=False, sheet_name="Metrics")
+    st.download_button(
+        "Download Grip comparison as Excel",
+        data=comparison_buffer.getvalue(),
+        file_name="grip_vs_obpp_comparison.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
 
 st.divider()
 
