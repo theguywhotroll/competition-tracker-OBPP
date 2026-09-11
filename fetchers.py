@@ -685,7 +685,12 @@ def parse_grip_csv_upload(uploaded_file):
     return _parse_grip_deals_df(raw_df)
 
 
+GRIP_LAST_ERROR = None
+
+
 def fetch_grip_deals():
+    global GRIP_LAST_ERROR
+    GRIP_LAST_ERROR = None
     rows = []
     url = ""
     try:
@@ -695,6 +700,7 @@ def fetch_grip_deals():
         url = os.environ.get("GRIP_METABASE_URL", "").strip()
 
     if not url:
+        GRIP_LAST_ERROR = "GRIP_METABASE_URL is not set in secrets"
         print("Skipping Grip: set GRIP_METABASE_URL in Streamlit secrets, or upload the CSV manually.")
         return rows
 
@@ -702,10 +708,27 @@ def fetch_grip_deals():
         csv_url = url if url.lower().endswith(".csv") else url.rstrip("/") + ".csv"
         resp = requests.get(csv_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=30)
         resp.raise_for_status()
+        content_type = resp.headers.get("Content-Type", "")
+        if "csv" not in content_type and resp.text.lstrip().lower().startswith(("<!doctype", "<html")):
+            GRIP_LAST_ERROR = (
+                f"GET {csv_url} returned HTML, not CSV (Content-Type: {content_type or 'unknown'}). "
+                "This usually means the link is a Metabase *dashboard* public link, not a *question* "
+                "public link -- dashboard links need a per-card export URL, e.g. "
+                "'/public/dashboard/<uuid>/dashcard/<dashcard_id>/card/<card_id>/csv'. "
+                "Share the underlying question's own public link instead (it ends in '/public/question/<uuid>')."
+            )
+            print(f"Error fetching Grip deals: {GRIP_LAST_ERROR}")
+            return rows
         raw_df = pd.read_csv(io.StringIO(resp.text))
         rows = _parse_grip_deals_df(raw_df)
         print(f"Grip: {len(rows)} rows")
+        if not rows:
+            GRIP_LAST_ERROR = (
+                f"Fetched {len(raw_df)} row(s) from {csv_url} but none matched "
+                "(live_status == TRUE and finance_product_type == 'Bonds'). Check the export isn't filtered/empty."
+            )
     except Exception as e:
+        GRIP_LAST_ERROR = f"{type(e).__name__}: {e}"
         print(f"Error fetching Grip deals: {e}")
     return rows
 

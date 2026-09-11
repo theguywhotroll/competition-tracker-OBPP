@@ -5,6 +5,7 @@ from datetime import datetime
 import pandas as pd
 import streamlit as st
 
+import fetchers
 from fetchers import COLUMNS, CONFIDENCE, FETCHERS, build_grip_comparison, parse_grip_csv_upload
 
 CONFIDENCE_COLOR = {"High": "green", "Good": "orange", "Reverify": "red"}
@@ -118,10 +119,8 @@ with st.sidebar:
             if info["status"] == "ok":
                 st.write(f":green[✓] {platform}: {info['rows']} rows ({info['elapsed']:.1f}s)")
             elif info["status"] == "empty" and platform == "Grip":
-                st.write(
-                    f":orange[⚠] {platform}: 0 rows — GRIP_METABASE_URL isn't set in secrets. "
-                    "Add it, or upload the CSV manually below instead."
-                )
+                grip_reason = info.get("error") or "GRIP_METABASE_URL isn't set in secrets"
+                st.write(f":orange[⚠] {platform}: 0 rows — {grip_reason}")
             elif info["status"] == "empty":
                 st.write(
                     f":orange[⚠] {platform}: 0 rows ({info['elapsed']:.1f}s) — "
@@ -152,8 +151,9 @@ if fetch_clicked:
                     summary[platform] = {"status": "ok", "rows": len(rows), "elapsed": elapsed}
                     status_box.write(f"✓ {platform}: {len(rows)} rows ({elapsed:.1f}s)")
                 elif platform == "Grip":
-                    summary[platform] = {"status": "empty", "rows": 0, "elapsed": elapsed}
-                    status_box.write(f"⚠ {platform}: 0 rows — GRIP_METABASE_URL isn't set in secrets")
+                    reason = fetchers.GRIP_LAST_ERROR or "GRIP_METABASE_URL isn't set in secrets"
+                    summary[platform] = {"status": "empty", "rows": 0, "elapsed": elapsed, "error": reason}
+                    status_box.write(f"⚠ {platform}: 0 rows — {reason}")
                 else:
                     summary[platform] = {"status": "empty", "rows": 0, "elapsed": elapsed}
                     status_box.write(
@@ -164,12 +164,21 @@ if fetch_clicked:
                 summary[platform] = {"status": "error", "error": str(e), "elapsed": elapsed}
                 status_box.write(f"✗ {platform}: {e}")
 
-        df = pd.DataFrame(all_rows, columns=COLUMNS)
+        new_df = pd.DataFrame(all_rows, columns=COLUMNS)
+        existing_df = st.session_state.data
+        if existing_df is not None and not existing_df.empty:
+            kept_df = existing_df[~existing_df["OBPP"].isin(selected_platforms)]
+            df = pd.concat([kept_df, new_df], ignore_index=True)
+        else:
+            df = new_df
         st.session_state.data = df
         st.session_state.last_fetched = datetime.now()
         st.session_state.data_source = "Fetched live"
-        st.session_state.fetch_summary = summary
-        status_box.update(label=f"Done — {len(df)} bonds from {len(selected_platforms)} platform(s)", state="complete")
+        st.session_state.fetch_summary = {**st.session_state.fetch_summary, **summary}
+        status_box.update(
+            label=f"Done — {len(new_df)} bonds from {len(selected_platforms)} platform(s), {len(df)} total",
+            state="complete",
+        )
         st.rerun()
 
 # ---------------------------------------------------------------------------
