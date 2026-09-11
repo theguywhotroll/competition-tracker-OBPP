@@ -151,7 +151,7 @@ if fetch_clicked:
                     summary[platform] = {"status": "ok", "rows": len(rows), "elapsed": elapsed}
                     status_box.write(f"✓ {platform}: {len(rows)} rows ({elapsed:.1f}s)")
                 elif platform == "Grip":
-                    reason = fetchers.GRIP_LAST_ERROR or "GRIP_METABASE_URL isn't set in secrets"
+                    reason = getattr(fetchers, "GRIP_LAST_ERROR", None) or "GRIP_METABASE_URL isn't set in secrets"
                     summary[platform] = {"status": "empty", "rows": 0, "elapsed": elapsed, "error": reason}
                     status_box.write(f"⚠ {platform}: 0 rows — {reason}")
                 else:
