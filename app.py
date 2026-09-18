@@ -91,6 +91,8 @@ if "last_upload_signature" not in st.session_state:
     st.session_state.last_upload_signature = None
 if "last_grip_upload_signature" not in st.session_state:
     st.session_state.last_grip_upload_signature = None
+if "fetch_summary" not in st.session_state:
+    st.session_state.fetch_summary = {}
 
 
 def style_bonds(data, ytm_columns=(), confidence_col=None):
@@ -221,14 +223,33 @@ with st.sidebar:
                 except Exception as e:
                     st.error(f"Couldn't read that CSV: {e}")
 
+    if st.session_state.fetch_summary:
+        st.divider()
+        st.subheader("Last fetch summary")
+        for platform, info in st.session_state.fetch_summary.items():
+            if info["status"] == "ok":
+                st.write(f":green[✓] {platform}: {info['rows']} rows ({info['elapsed']:.1f}s)")
+            elif info["status"] == "empty" and platform == "Grip":
+                grip_reason = info.get("error") or "GRIP_METABASE_URL isn't set in secrets"
+                st.write(f":orange[⚠] {platform}: 0 rows — {grip_reason}")
+            elif info["status"] == "empty":
+                st.write(
+                    f":orange[⚠] {platform}: 0 rows ({info['elapsed']:.1f}s) — "
+                    "likely blocked/rate-limited upstream, not necessarily a real 'no bonds'."
+                )
+            else:
+                st.write(f":red[✗] {platform}: {info['error']}")
+
 # ---------------------------------------------------------------------------
-# Fetch -- per-platform results go to the logs only (print), never the UI
+# Fetch -- per-platform results are logged (print) and kept for the sidebar
+# summary; the main page never shows per-platform fetch detail.
 # ---------------------------------------------------------------------------
 if fetch_clicked:
     if not selected_platforms:
         st.sidebar.error("Select at least one platform.")
     else:
         all_rows = []
+        summary = {}
         with st.spinner(f"Fetching {len(selected_platforms)} platform(s)..."):
             for platform in selected_platforms:
                 start = time.time()
@@ -237,13 +258,18 @@ if fetch_clicked:
                     elapsed = time.time() - start
                     all_rows.extend(rows)
                     if rows:
+                        summary[platform] = {"status": "ok", "rows": len(rows), "elapsed": elapsed}
                         print(f"✓ {platform}: {len(rows)} rows ({elapsed:.1f}s)")
                     elif platform == "Grip":
                         reason = getattr(fetchers, "GRIP_LAST_ERROR", None) or "GRIP_METABASE_URL isn't set in secrets"
+                        summary[platform] = {"status": "empty", "rows": 0, "elapsed": elapsed, "error": reason}
                         print(f"⚠ {platform}: 0 rows — {reason}")
                     else:
+                        summary[platform] = {"status": "empty", "rows": 0, "elapsed": elapsed}
                         print(f"⚠ {platform}: 0 rows ({elapsed:.1f}s) — likely blocked/rate-limited upstream")
                 except Exception as e:
+                    elapsed = time.time() - start
+                    summary[platform] = {"status": "error", "error": str(e), "elapsed": elapsed}
                     print(f"✗ {platform}: {e}")
 
         new_df = pd.DataFrame(all_rows, columns=COLUMNS)
@@ -257,6 +283,7 @@ if fetch_clicked:
         st.session_state.data = df
         st.session_state.last_fetched = datetime.now()
         st.session_state.data_source = "Fetched live"
+        st.session_state.fetch_summary = {**st.session_state.fetch_summary, **summary}
         st.session_state.collapse_sidebar_pending = True
         st.toast(f"Fetched {len(new_df)} bonds from {len(selected_platforms)} platform(s) — {len(df)} total", icon="✅")
         st.rerun()
@@ -286,10 +313,9 @@ numeric["min_investment"] = pd.to_numeric(df["Minimum Investment Amount"], error
 # ---------------------------------------------------------------------------
 # Summary metrics
 # ---------------------------------------------------------------------------
-mcol1, mcol2, mcol3 = st.columns(3)
-mcol1.metric("Total bonds", len(df))
-mcol2.metric("Platforms", df["OBPP"].nunique())
-mcol3.metric("Unique issuers", df["Issuer"].nunique())
+mcol1, mcol2 = st.columns(2)
+mcol1.metric("Platforms", df["OBPP"].nunique())
+mcol2.metric("Unique ISIN", df["ISIN"].nunique())
 
 st.divider()
 
@@ -358,13 +384,24 @@ with tab_overview:
     st.divider()
     st.markdown("#### Yield vs. tenure, by platform")
     st.caption("Where each platform's book sits on the risk/duration curve -- a bond high and to the left is a standout.")
+    all_obpps = sorted(df["OBPP"].unique())
+    scatter_platforms = st.multiselect(
+        "Platforms to compare in this chart",
+        options=all_obpps,
+        default=all_obpps,
+        key="scatter_platforms",
+        help="Narrow this down to, say, Grip + one competitor, or any two OBPPs, to compare just those.",
+    )
     scatter_df = pd.DataFrame({
         "OBPP": df["OBPP"],
         "Issuer": df["Issuer"],
         "YTM": numeric["ytm"],
         "Tenure": numeric["tenure"],
     }).dropna(subset=["YTM", "Tenure"])
-    if not scatter_df.empty:
+    scatter_df = scatter_df[scatter_df["OBPP"].isin(scatter_platforms)]
+    if not scatter_platforms:
+        st.caption("Pick at least one platform above to plot.")
+    elif not scatter_df.empty:
         chart_scatter = (
             alt.Chart(scatter_df)
             .mark_circle(size=70, opacity=0.65)
@@ -540,10 +577,6 @@ if comparison:
                 "YTM Delta (Grip - OBPP)": st.column_config.NumberColumn("YTM Delta", format="%.2f%%", alignment="left"),
             },
         )
-
-        if not matched.empty:
-            with st.expander("YTM delta by bond (matched, Grip − best OBPP)"):
-                st.bar_chart(matched.set_index("ISIN")["YTM Delta (Grip - OBPP)"])
 
         comparison_buffer = io.BytesIO()
         with pd.ExcelWriter(comparison_buffer, engine="openpyxl") as writer:

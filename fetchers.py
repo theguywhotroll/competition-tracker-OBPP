@@ -1169,6 +1169,85 @@ def fetch_stable():
 
 
 # ---------------------------------------------------------------------------
+# Groww
+# ---------------------------------------------------------------------------
+def fetch_groww():
+    url = "https://groww.in/v1/api/bonds-rfq/v1/data"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    rows = []
+    try:
+        resp = requests.get(url, headers=headers, timeout=30)
+        resp.raise_for_status()
+        for item in resp.json():
+            isin = item.get("isin", "")
+            if not isin:
+                continue
+            tenure_match = re.search(r"(\d+)", item.get("tenure", "") or "")
+            rows.append({
+                "OBPP": "Groww",
+                "ISIN": isin,
+                "Issuer": item.get("name", ""),
+                "YTM (%)": to_float(item.get("yieldPercentage")),
+                "Rating": item.get("rating", ""),
+                "Tenure (Months)": int(tenure_match.group(1)) if tenure_match else None,
+                "Face Value": None,
+                "Minimum Investment Amount": to_float(item.get("minInvestmentAmount")),
+            })
+        print(f"Groww: {len(rows)} rows")
+    except requests.exceptions.RequestException as e:
+        print(f"Error fetching Groww data: {e}")
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# BondScanner
+# ---------------------------------------------------------------------------
+def fetch_bondscanner():
+    url = "https://loom.bondscanner.com/v1/issuer/ipc?size=200&bond_type=ALL_BONDS"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    rows = []
+
+    def months_left(maturity_date_str):
+        try:
+            maturity = datetime.fromisoformat(maturity_date_str)
+            now = datetime.now(maturity.tzinfo) if maturity.tzinfo else datetime.now()
+            if maturity <= now:
+                return 0
+            diff = relativedelta(maturity, now)
+            return diff.years * 12 + diff.months
+        except (ValueError, TypeError):
+            return None
+
+    try:
+        resp = requests.get(url, headers=headers, timeout=30)
+        resp.raise_for_status()
+        for item in resp.json().get("data", {}).get("data", []):
+            if item.get("state") != "LIVE":
+                continue
+            isin = item.get("isin", "")
+            if not isin:
+                continue
+            tenure_months = item.get("tenureMonths")
+            if tenure_months is None:
+                maturity_date_str = item.get("maturityDate")
+                tenure_months = months_left(maturity_date_str) if maturity_date_str else None
+            rows.append({
+                "OBPP": "BondScanner",
+                "ISIN": isin,
+                "Issuer": item.get("issuerName", ""),
+                "YTM (%)": to_float(item.get("yield")),
+                "Rating": item.get("ratings", ""),
+                "Tenure (Months)": tenure_months,
+                "Face Value": to_float(item.get("principalAtMaturity")),
+                "Minimum Investment Amount": to_float(item.get("minInvestmentAmount")),
+            })
+        print(f"BondScanner: {len(rows)} rows")
+    except requests.exceptions.RequestException as e:
+        print(f"Error fetching BondScanner data: {e}")
+    return rows
+
+
+# ---------------------------------------------------------------------------
 # Registry consumed by the Streamlit app: platform name -> fetch function.
 # Order here determines the order platforms are fetched / shown as options.
 # ---------------------------------------------------------------------------
@@ -1186,6 +1265,8 @@ FETCHERS = {
     "INRBonds": fetch_inrbonds,
     "GoldenPi": fetch_goldenpi,
     "TheFixedIncome": fetch_thefixedincome,
+    "Groww": fetch_groww,
+    "BondScanner": fetch_bondscanner,
     "Grip": fetch_grip_deals,
 }
 
@@ -1218,4 +1299,6 @@ CONFIDENCE = {
     "Smest": ("Good", "ISIN/YTM are direct; Issuer and Rating are parsed out of compound text fields. Minimum Investment uses their `minimum_quantity` field as-is, unverified. Bonds with tenure over 36 months are filtered out entirely."),
     "Stable": ("Reverify", "Their API returns undocumented raw binary with no public schema — every field is reverse-engineered from byte patterns. Spot-checked exact on 3 live bonds, but Rating/Tenure are blank on a handful of rows, and an upstream format change could silently break this."),
     "TheFixedIncome": ("Reverify", "Site blocks scripted access; data is scraped from rendered HTML via a headless browser. Accurate when it works, but fragile to markup changes and can be temporarily rate-limited."),
+    "Groww": ("Good", "Official JSON API; YTM/Rating/Min Investment are direct fields. Face Value isn't exposed by their API (left blank), and Tenure is parsed from a free-text field (e.g. '35 months') rather than a raw number."),
+    "BondScanner": ("Good", "Official JSON API; YTM/Rating/Min Investment are direct fields. Face Value and Tenure are always null in their response, so Tenure is computed from the bond's maturity date instead, and Face Value is left blank."),
 }
