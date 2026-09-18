@@ -98,7 +98,12 @@ if "fetch_summary" not in st.session_state:
 def style_bonds(data, ytm_columns=(), confidence_col=None):
     """Left-aligns nothing itself (column_config handles that) -- just tints
     the cells worth a second look: top-quartile yields and the confidence
-    tier, so the table reads at a glance instead of as a wall of numbers."""
+    tier, so the table reads at a glance instead of as a wall of numbers.
+
+    The top-quartile cutoff is computed per unique ISIN (one bond, one vote),
+    not per row -- otherwise a bond listed on five platforms would count five
+    times toward the threshold and skew it, making the highlight look like it
+    favors whichever issuer happens to cross-list the most."""
     styler = data.style
     for col in ytm_columns:
         if col not in data.columns:
@@ -106,7 +111,11 @@ def style_bonds(data, ytm_columns=(), confidence_col=None):
         numeric_col = pd.to_numeric(data[col], errors="coerce")
         if not numeric_col.notna().any():
             continue
-        threshold = numeric_col.quantile(0.85)
+        if "ISIN" in data.columns:
+            per_isin_best = pd.DataFrame({"ISIN": data["ISIN"], "ytm": numeric_col}).groupby("ISIN")["ytm"].max()
+            threshold = per_isin_best.quantile(0.85)
+        else:
+            threshold = numeric_col.quantile(0.85)
 
         def _highlight(val, threshold=threshold):
             v = pd.to_numeric(pd.Series([val]), errors="coerce").iloc[0]
@@ -327,16 +336,12 @@ comparison = build_grip_comparison(df)
 tab_labels = ["📊 Overview", "📋 Detailed Listings"]
 if comparison:
     tab_labels.append("⚖️ Grip vs Competition")
-tab_labels.append("ℹ️ Data Quality")
 tabs = st.tabs(tab_labels)
 
 tab_overview = tabs[0]
 tab_detail = tabs[1]
-next_idx = 2
 if comparison:
-    tab_grip = tabs[next_idx]
-    next_idx += 1
-tab_quality = tabs[next_idx]
+    tab_grip = tabs[2]
 
 # --- Overview -----------------------------------------------------------
 with tab_overview:
@@ -492,11 +497,13 @@ with tab_detail:
     filtered = df[mask].copy()
 
     st.caption(f"Showing {len(filtered)} of {len(df)} bonds · :green[**highlighted**] rows are top-quartile YTM for the current view")
+    visible_cols = [c for c in filtered.columns if c not in ("Confidence", "Minimum Investment Amount")]
     st.dataframe(
         style_bonds(filtered, ytm_columns=["YTM (%)"], confidence_col="Confidence"),
         width="stretch",
         height=520,
         hide_index=True,
+        column_order=visible_cols,
         column_config={
             "OBPP": st.column_config.TextColumn("OBPP", alignment="left"),
             "Confidence": st.column_config.TextColumn("Confidence", alignment="left"),
@@ -547,7 +554,6 @@ if comparison:
         gc4.metric("Grip win rate on matches", m["Grip win rate on matches (YTM >= best competitor)"])
 
         st.divider()
-        st.markdown("#### Matched bonds (same ISIN)")
 
         matched = comparison["matched"]
         matched_display_cols = [
@@ -557,26 +563,46 @@ if comparison:
         ]
         matched_display_cols = [c for c in matched_display_cols if c in matched.columns]
 
-        st.dataframe(
-            style_bonds(matched[matched_display_cols], ytm_columns=["Grip YTM (%)"]),
-            width="stretch",
-            height=400,
-            hide_index=True,
-            column_config={
-                "ISIN": st.column_config.TextColumn("ISIN", alignment="left"),
-                "Issuer": st.column_config.TextColumn("Issuer", alignment="left"),
-                "Grip YTM (%)": st.column_config.NumberColumn("Grip YTM (%)", format="%.2f%%", alignment="left"),
-                "Grip Face Value": st.column_config.NumberColumn("Grip Face Value", format="₹%d", alignment="left"),
-                "Grip Tenure (Months)": st.column_config.NumberColumn("Grip Tenure (mo)", format="%.0f", alignment="left"),
-                "Grip Rating": st.column_config.TextColumn("Grip Rating", alignment="left"),
-                "Best OBPP": st.column_config.TextColumn("Best OBPP", alignment="left"),
-                "Best OBPP YTM (%)": st.column_config.NumberColumn("Best OBPP YTM (%)", format="%.2f%%", alignment="left"),
-                "OBPP Face Value": st.column_config.NumberColumn("OBPP Face Value", format="₹%d", alignment="left"),
-                "OBPP Tenure (Months)": st.column_config.NumberColumn("OBPP Tenure (mo)", format="%.0f", alignment="left"),
-                "OBPP Rating": st.column_config.TextColumn("OBPP Rating", alignment="left"),
-                "YTM Delta (Grip - OBPP)": st.column_config.NumberColumn("YTM Delta", format="%.2f%%", alignment="left"),
-            },
-        )
+        grip_col_config = {
+            "ISIN": st.column_config.TextColumn("ISIN", alignment="left"),
+            "Issuer": st.column_config.TextColumn("Issuer", alignment="left"),
+            "Grip YTM (%)": st.column_config.NumberColumn("Grip YTM (%)", format="%.2f%%", alignment="left"),
+            "Grip Face Value": st.column_config.NumberColumn("Grip Face Value", format="₹%d", alignment="left"),
+            "Grip Tenure (Months)": st.column_config.NumberColumn("Grip Tenure (mo)", format="%.0f", alignment="left"),
+            "Grip Rating": st.column_config.TextColumn("Grip Rating", alignment="left"),
+            "Best OBPP": st.column_config.TextColumn("Best OBPP", alignment="left"),
+            "Best OBPP YTM (%)": st.column_config.NumberColumn("Best OBPP YTM (%)", format="%.2f%%", alignment="left"),
+            "OBPP Face Value": st.column_config.NumberColumn("OBPP Face Value", format="₹%d", alignment="left"),
+            "OBPP Tenure (Months)": st.column_config.NumberColumn("OBPP Tenure (mo)", format="%.0f", alignment="left"),
+            "OBPP Rating": st.column_config.TextColumn("OBPP Rating", alignment="left"),
+            "YTM Delta (Grip - OBPP)": st.column_config.NumberColumn("YTM Delta", format="%.2f%%", alignment="left"),
+        }
+
+        sub_tab1, sub_tab2, sub_tab3 = st.tabs(["Matched bonds (same ISIN)", "Grip-only bonds", "OBPP-only bonds"])
+        with sub_tab1:
+            st.dataframe(
+                style_bonds(matched[matched_display_cols], ytm_columns=["Grip YTM (%)"]),
+                width="stretch",
+                height=400,
+                hide_index=True,
+                column_config=grip_col_config,
+            )
+        with sub_tab2:
+            st.dataframe(
+                style_bonds(comparison["grip_only"], ytm_columns=["Grip YTM (%)"]),
+                width="stretch",
+                height=350,
+                hide_index=True,
+                column_config=grip_col_config,
+            )
+        with sub_tab3:
+            st.dataframe(
+                style_bonds(comparison["obpp_only"], ytm_columns=["Best OBPP YTM (%)"]),
+                width="stretch",
+                height=350,
+                hide_index=True,
+                column_config=grip_col_config,
+            )
 
         comparison_buffer = io.BytesIO()
         with pd.ExcelWriter(comparison_buffer, engine="openpyxl") as writer:
@@ -592,7 +618,8 @@ if comparison:
         )
 
 # --- Data Quality -----------------------------------------------------
-with tab_quality:
+st.divider()
+with st.expander("ℹ️ Data Quality — which fetches to trust vs. reverify manually", expanded=False):
     st.markdown(
         "**High** — clean, direct fields from an official-style JSON API. "
         "**Good** — mostly direct, but with a documented caveat (an inferred value, or a filter that narrows results). "
