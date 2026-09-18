@@ -700,12 +700,6 @@ def _parse_grip_deals_df(raw_df):
     return rows
 
 
-def parse_grip_csv_upload(uploaded_file):
-    """Used by the sidebar's manual CSV upload path (bypasses the Metabase URL)."""
-    raw_df = pd.read_csv(uploaded_file)
-    return _parse_grip_deals_df(raw_df)
-
-
 GRIP_LAST_ERROR = None
 
 

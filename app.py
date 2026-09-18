@@ -8,7 +8,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 import fetchers
-from fetchers import COLUMNS, CONFIDENCE, FETCHERS, build_grip_comparison, parse_grip_csv_upload
+from fetchers import COLUMNS, CONFIDENCE, FETCHERS, build_grip_comparison
 
 # ---------------------------------------------------------------------------
 # Look & feel -- mirrors the palette in .streamlit/config.toml
@@ -89,8 +89,6 @@ if "data_source" not in st.session_state:
     st.session_state.data_source = None
 if "last_upload_signature" not in st.session_state:
     st.session_state.last_upload_signature = None
-if "last_grip_upload_signature" not in st.session_state:
-    st.session_state.last_grip_upload_signature = None
 if "fetch_summary" not in st.session_state:
     st.session_state.fetch_summary = {}
 
@@ -198,39 +196,6 @@ with st.sidebar:
                         st.rerun()
                 except Exception as e:
                     st.error(f"Couldn't read that file: {e}")
-
-    with st.expander("Or upload Grip's live deals"):
-        st.caption(
-            "'Grip' is already one of the platforms above and fetches automatically from "
-            "GRIP_METABASE_URL if that secret is set. Use this instead to refresh just "
-            "Grip's numbers without re-fetching every OBPP, or if the secret isn't set yet."
-        )
-        grip_csv_file = st.file_uploader("Upload the Metabase 'Platform Live Deals' CSV", type=["csv"])
-        if grip_csv_file is not None:
-            grip_signature = f"{grip_csv_file.name}-{grip_csv_file.size}"
-            if st.session_state.last_grip_upload_signature != grip_signature:
-                try:
-                    grip_rows = parse_grip_csv_upload(grip_csv_file)
-                    if not grip_rows:
-                        st.warning("No live 'Bonds' rows found in that CSV.")
-                    else:
-                        base_df_full = st.session_state.data
-                        base_df = (
-                            base_df_full[base_df_full["OBPP"] != "Grip"]
-                            if base_df_full is not None and not base_df_full.empty
-                            else pd.DataFrame(columns=COLUMNS)
-                        )
-                        grip_df_new = pd.DataFrame(grip_rows, columns=COLUMNS)
-                        st.session_state.data = pd.concat([base_df, grip_df_new], ignore_index=True)
-                        if st.session_state.last_fetched is None:
-                            st.session_state.last_fetched = datetime.now()
-                            st.session_state.data_source = "Fetched live"
-                        st.session_state.last_grip_upload_signature = grip_signature
-                        st.session_state.collapse_sidebar_pending = True
-                        st.toast(f"Loaded {len(grip_df_new)} Grip bonds", icon="✅")
-                        st.rerun()
-                except Exception as e:
-                    st.error(f"Couldn't read that CSV: {e}")
 
     if st.session_state.fetch_summary:
         st.divider()
