@@ -781,16 +781,19 @@ def build_grip_comparison(df):
     grip_best = (
         grip_df.sort_values("YTM (%)", ascending=False)
         .groupby("ISIN", as_index=False)
-        .first()[["ISIN", "Issuer", "YTM (%)", "Rating", "Tenure (Months)"]]
-        .rename(columns={"YTM (%)": "Grip YTM (%)", "Rating": "Grip Rating", "Tenure (Months)": "Grip Tenure (Months)"})
+        .first()[["ISIN", "Issuer", "YTM (%)", "Rating", "Tenure (Months)", "Face Value"]]
+        .rename(columns={
+            "YTM (%)": "Grip YTM (%)", "Rating": "Grip Rating", "Tenure (Months)": "Grip Tenure (Months)",
+            "Face Value": "Grip Face Value",
+        })
     )
     obpp_best = (
         obpp_df.sort_values("YTM (%)", ascending=False)
         .groupby("ISIN", as_index=False)
-        .first()[["ISIN", "OBPP", "YTM (%)", "Rating", "Tenure (Months)"]]
+        .first()[["ISIN", "OBPP", "YTM (%)", "Rating", "Tenure (Months)", "Face Value"]]
         .rename(columns={
             "OBPP": "Best OBPP", "YTM (%)": "Best OBPP YTM (%)",
-            "Rating": "OBPP Rating", "Tenure (Months)": "OBPP Tenure (Months)",
+            "Rating": "OBPP Rating", "Tenure (Months)": "OBPP Tenure (Months)", "Face Value": "OBPP Face Value",
         })
     )
 

@@ -5,6 +5,7 @@ from datetime import datetime
 import altair as alt
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 import fetchers
 from fetchers import COLUMNS, CONFIDENCE, FETCHERS, build_grip_comparison, parse_grip_csv_upload
@@ -14,7 +15,14 @@ from fetchers import COLUMNS, CONFIDENCE, FETCHERS, build_grip_comparison, parse
 # ---------------------------------------------------------------------------
 PRIMARY_COLOR = "#0F4C81"   # deep blue -- listing counts
 ACCENT_COLOR = "#12A594"    # teal -- yield
+HIGH_YTM_BG = "#E3F6F1"
+HIGH_YTM_TEXT = "#0B6B57"
 
+CONFIDENCE_TEXT_STYLE = {
+    "High": "color: #0B6B57; font-weight: 600",
+    "Good": "color: #92600B; font-weight: 600",
+    "Reverify": "color: #B42318; font-weight: 600",
+}
 CONFIDENCE_COLOR = {"High": "green", "Good": "orange", "Reverify": "red"}
 CONFIDENCE_ORDER = {"High": 0, "Good": 1, "Reverify": 2}
 
@@ -23,22 +31,90 @@ CONFIDENCE_ORDER = {"High": 0, "Good": 1, "Reverify": 2}
 STALE_WARN_HOURS = 6
 STALE_ERROR_HOURS = 24
 
-st.set_page_config(page_title="Bond Competition Tracker", page_icon="📈", layout="wide")
+st.set_page_config(
+    page_title="Bond Competition Tracker",
+    page_icon="📈",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+if "collapse_sidebar_pending" not in st.session_state:
+    st.session_state.collapse_sidebar_pending = False
+
+if st.session_state.collapse_sidebar_pending:
+    st.session_state.collapse_sidebar_pending = False
+    # Streamlit has no public API to collapse the sidebar programmatically,
+    # so we click its own collapse button through the parent frame. If a
+    # future Streamlit version renames this test id, this just quietly
+    # becomes a no-op -- the sidebar stays open, nothing breaks.
+    components.html(
+        """
+        <script>
+        (function () {
+            const doc = window.parent.document;
+            let btn = doc.querySelector('[data-testid="stSidebarCollapseButton"] button');
+            if (!btn) {
+                const sidebar = doc.querySelector('[data-testid="stSidebar"]');
+                if (sidebar) btn = sidebar.querySelector('button[aria-label*="sidebar" i], button[aria-label*="close" i]');
+            }
+            if (btn) btn.click();
+        })();
+        </script>
+        """,
+        height=0,
+    )
+
+st.markdown(
+    """
+    <style>
+    div[data-testid="stMetric"] {
+        background: #F4F6F8;
+        border-radius: 10px;
+        border-left: 4px solid #0F4C81;
+        padding: 12px 16px 8px 16px;
+    }
+    div[data-testid="stMetricValue"] {
+        color: #0F4C81;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 if "data" not in st.session_state:
     st.session_state.data = None
 if "last_fetched" not in st.session_state:
     st.session_state.last_fetched = None
-if "fetch_summary" not in st.session_state:
-    st.session_state.fetch_summary = {}
 if "data_source" not in st.session_state:
     st.session_state.data_source = None
 if "last_upload_signature" not in st.session_state:
     st.session_state.last_upload_signature = None
 if "last_grip_upload_signature" not in st.session_state:
     st.session_state.last_grip_upload_signature = None
-if "new_since_last_fetch" not in st.session_state:
-    st.session_state.new_since_last_fetch = None
+
+
+def style_bonds(data, ytm_columns=(), confidence_col=None):
+    """Left-aligns nothing itself (column_config handles that) -- just tints
+    the cells worth a second look: top-quartile yields and the confidence
+    tier, so the table reads at a glance instead of as a wall of numbers."""
+    styler = data.style
+    for col in ytm_columns:
+        if col not in data.columns:
+            continue
+        numeric_col = pd.to_numeric(data[col], errors="coerce")
+        if not numeric_col.notna().any():
+            continue
+        threshold = numeric_col.quantile(0.85)
+
+        def _highlight(val, threshold=threshold):
+            v = pd.to_numeric(pd.Series([val]), errors="coerce").iloc[0]
+            return f"background-color: {HIGH_YTM_BG}; color: {HIGH_YTM_TEXT}; font-weight: 700" if pd.notna(v) and v >= threshold else ""
+
+        styler = styler.map(_highlight, subset=[col])
+    if confidence_col and confidence_col in data.columns:
+        styler = styler.map(lambda v: CONFIDENCE_TEXT_STYLE.get(v, ""), subset=[confidence_col])
+    return styler
+
 
 # ---------------------------------------------------------------------------
 # Header
@@ -84,7 +160,6 @@ with st.sidebar:
 
     fetch_clicked = st.button("Fetch Latest Data", type="primary", width="stretch")
 
-    st.divider()
     with st.expander("Or load a local export"):
         st.caption(
             "Some platforms (IndiaBonds, GoldenPi, TheFixedIncome) can be blocked when "
@@ -106,9 +181,9 @@ with st.sidebar:
                         st.session_state.data = uploaded_df
                         st.session_state.last_fetched = datetime.now()
                         st.session_state.data_source = f"Uploaded: {uploaded_file.name}"
-                        st.session_state.fetch_summary = {}
-                        st.session_state.new_since_last_fetch = None
                         st.session_state.last_upload_signature = upload_signature
+                        st.session_state.collapse_sidebar_pending = True
+                        st.toast(f"Loaded {len(uploaded_df)} bonds from {uploaded_file.name}", icon="✅")
                         st.rerun()
                 except Exception as e:
                     st.error(f"Couldn't read that file: {e}")
@@ -129,97 +204,61 @@ with st.sidebar:
                         st.warning("No live 'Bonds' rows found in that CSV.")
                     else:
                         base_df_full = st.session_state.data
-                        if base_df_full is not None and not base_df_full.empty:
-                            prior_grip_isins = set(
-                                base_df_full.loc[base_df_full["OBPP"] == "Grip", "ISIN"].astype(str)
-                            )
-                            base_df = base_df_full[base_df_full["OBPP"] != "Grip"]
-                        else:
-                            prior_grip_isins = set()
-                            base_df = pd.DataFrame(columns=COLUMNS)
+                        base_df = (
+                            base_df_full[base_df_full["OBPP"] != "Grip"]
+                            if base_df_full is not None and not base_df_full.empty
+                            else pd.DataFrame(columns=COLUMNS)
+                        )
                         grip_df_new = pd.DataFrame(grip_rows, columns=COLUMNS)
-                        new_grip_isins = set(grip_df_new["ISIN"].astype(str)) - prior_grip_isins
-                        st.session_state.new_since_last_fetch = len(new_grip_isins)
                         st.session_state.data = pd.concat([base_df, grip_df_new], ignore_index=True)
                         if st.session_state.last_fetched is None:
                             st.session_state.last_fetched = datetime.now()
                             st.session_state.data_source = "Fetched live"
                         st.session_state.last_grip_upload_signature = grip_signature
+                        st.session_state.collapse_sidebar_pending = True
+                        st.toast(f"Loaded {len(grip_df_new)} Grip bonds", icon="✅")
                         st.rerun()
                 except Exception as e:
                     st.error(f"Couldn't read that CSV: {e}")
 
-    if st.session_state.fetch_summary:
-        st.divider()
-        st.subheader("Last fetch summary")
-        for platform, info in st.session_state.fetch_summary.items():
-            if info["status"] == "ok":
-                st.write(f":green[✓] {platform}: {info['rows']} rows ({info['elapsed']:.1f}s)")
-            elif info["status"] == "empty" and platform == "Grip":
-                grip_reason = info.get("error") or "GRIP_METABASE_URL isn't set in secrets"
-                st.write(f":orange[⚠] {platform}: 0 rows — {grip_reason}")
-            elif info["status"] == "empty":
-                st.write(
-                    f":orange[⚠] {platform}: 0 rows ({info['elapsed']:.1f}s) — "
-                    "likely blocked/rate-limited upstream, not necessarily a real 'no bonds'. "
-                    "Check the terminal for the printed error, then retry."
-                )
-            else:
-                st.write(f":red[✗] {platform}: {info['error']}")
-
 # ---------------------------------------------------------------------------
-# Fetch
+# Fetch -- per-platform results go to the logs only (print), never the UI
 # ---------------------------------------------------------------------------
 if fetch_clicked:
     if not selected_platforms:
         st.sidebar.error("Select at least one platform.")
     else:
         all_rows = []
-        summary = {}
-        status_box = st.status("Fetching bond data...", expanded=True)
-        for platform in selected_platforms:
-            status_box.write(f"Fetching {platform}...")
-            start = time.time()
-            try:
-                rows = FETCHERS[platform]()
-                elapsed = time.time() - start
-                all_rows.extend(rows)
-                if rows:
-                    summary[platform] = {"status": "ok", "rows": len(rows), "elapsed": elapsed}
-                    status_box.write(f"✓ {platform}: {len(rows)} rows ({elapsed:.1f}s)")
-                elif platform == "Grip":
-                    reason = getattr(fetchers, "GRIP_LAST_ERROR", None) or "GRIP_METABASE_URL isn't set in secrets"
-                    summary[platform] = {"status": "empty", "rows": 0, "elapsed": elapsed, "error": reason}
-                    status_box.write(f"⚠ {platform}: 0 rows — {reason}")
-                else:
-                    summary[platform] = {"status": "empty", "rows": 0, "elapsed": elapsed}
-                    status_box.write(
-                        f"⚠ {platform}: 0 rows ({elapsed:.1f}s) — likely blocked/rate-limited, see terminal for details"
-                    )
-            except Exception as e:
-                elapsed = time.time() - start
-                summary[platform] = {"status": "error", "error": str(e), "elapsed": elapsed}
-                status_box.write(f"✗ {platform}: {e}")
+        with st.spinner(f"Fetching {len(selected_platforms)} platform(s)..."):
+            for platform in selected_platforms:
+                start = time.time()
+                try:
+                    rows = FETCHERS[platform]()
+                    elapsed = time.time() - start
+                    all_rows.extend(rows)
+                    if rows:
+                        print(f"✓ {platform}: {len(rows)} rows ({elapsed:.1f}s)")
+                    elif platform == "Grip":
+                        reason = getattr(fetchers, "GRIP_LAST_ERROR", None) or "GRIP_METABASE_URL isn't set in secrets"
+                        print(f"⚠ {platform}: 0 rows — {reason}")
+                    else:
+                        print(f"⚠ {platform}: 0 rows ({elapsed:.1f}s) — likely blocked/rate-limited upstream")
+                except Exception as e:
+                    print(f"✗ {platform}: {e}")
 
         new_df = pd.DataFrame(all_rows, columns=COLUMNS)
         existing_df = st.session_state.data
         if existing_df is not None and not existing_df.empty:
-            prior_isins = set(existing_df.loc[existing_df["OBPP"].isin(selected_platforms), "ISIN"].astype(str))
             kept_df = existing_df[~existing_df["OBPP"].isin(selected_platforms)]
             df = pd.concat([kept_df, new_df], ignore_index=True)
         else:
-            prior_isins = set()
             df = new_df
-        st.session_state.new_since_last_fetch = len(set(new_df["ISIN"].astype(str)) - prior_isins)
 
         st.session_state.data = df
         st.session_state.last_fetched = datetime.now()
         st.session_state.data_source = "Fetched live"
-        st.session_state.fetch_summary = {**st.session_state.fetch_summary, **summary}
-        status_box.update(
-            label=f"Done — {len(new_df)} bonds from {len(selected_platforms)} platform(s), {len(df)} total",
-            state="complete",
-        )
+        st.session_state.collapse_sidebar_pending = True
+        st.toast(f"Fetched {len(new_df)} bonds from {len(selected_platforms)} platform(s) — {len(df)} total", icon="✅")
         st.rerun()
 
 # ---------------------------------------------------------------------------
@@ -247,17 +286,10 @@ numeric["min_investment"] = pd.to_numeric(df["Minimum Investment Amount"], error
 # ---------------------------------------------------------------------------
 # Summary metrics
 # ---------------------------------------------------------------------------
-mcol1, mcol2, mcol3, mcol4, mcol5 = st.columns(5)
+mcol1, mcol2, mcol3 = st.columns(3)
 mcol1.metric("Total bonds", len(df))
 mcol2.metric("Platforms", df["OBPP"].nunique())
-mcol3.metric("Avg YTM (%)", f"{numeric['ytm'].mean():.2f}" if numeric["ytm"].notna().any() else "—")
-mcol4.metric("Unique issuers", df["Issuer"].nunique())
-new_since = st.session_state.new_since_last_fetch
-mcol5.metric(
-    "New since last scrape",
-    "—" if new_since is None else new_since,
-    help="ISINs that weren't present the last time these platforms were fetched or uploaded.",
-)
+mcol3.metric("Unique issuers", df["Issuer"].nunique())
 
 st.divider()
 
@@ -323,38 +355,83 @@ with tab_overview:
         )
         st.altair_chart(chart_ytm, use_container_width=True)
 
+    st.divider()
+    st.markdown("#### Yield vs. tenure, by platform")
+    st.caption("Where each platform's book sits on the risk/duration curve -- a bond high and to the left is a standout.")
+    scatter_df = pd.DataFrame({
+        "OBPP": df["OBPP"],
+        "Issuer": df["Issuer"],
+        "YTM": numeric["ytm"],
+        "Tenure": numeric["tenure"],
+    }).dropna(subset=["YTM", "Tenure"])
+    if not scatter_df.empty:
+        chart_scatter = (
+            alt.Chart(scatter_df)
+            .mark_circle(size=70, opacity=0.65)
+            .encode(
+                x=alt.X("Tenure:Q", title="Tenure (months)"),
+                y=alt.Y("YTM:Q", title="YTM (%)"),
+                color=alt.Color("OBPP:N", legend=alt.Legend(title="Platform")),
+                tooltip=["OBPP", "Issuer", alt.Tooltip("YTM:Q", format=".2f"), "Tenure"],
+            )
+            .properties(height=380)
+        )
+        st.altair_chart(chart_scatter, use_container_width=True)
+    else:
+        st.caption("Not enough YTM/Tenure data to plot yet.")
+
+    st.divider()
+    st.markdown("#### Rating mix by platform")
+    st.caption("Credit-quality composition of each platform's live book.")
+    rating_df = df.copy()
+    rating_df["Rating"] = rating_df["Rating"].astype(str).str.strip()
+    rating_df.loc[rating_df["Rating"].isin(["", "nan", "None"]), "Rating"] = "Unrated"
+    rating_counts = rating_df.groupby(["OBPP", "Rating"], as_index=False).size().rename(columns={"size": "Count"})
+    chart_rating = (
+        alt.Chart(rating_counts)
+        .mark_bar()
+        .encode(
+            x=alt.X("OBPP:N", title=None),
+            y=alt.Y("Count:Q", title="Listings"),
+            color=alt.Color("Rating:N", legend=alt.Legend(title="Rating")),
+            tooltip=["OBPP", "Rating", "Count"],
+        )
+        .properties(height=340)
+    )
+    st.altair_chart(chart_rating, use_container_width=True)
+
 # --- Detailed Listings ----------------------------------------------------
 with tab_detail:
     with st.container(border=True):
         st.markdown("#### Filters")
-        f1, f2, f3, f4 = st.columns(4)
-
+        f1, f2, f3 = st.columns(3)
         with f1:
             obpp_filter = st.multiselect(
                 "OBPP", options=sorted(df["OBPP"].unique()), default=sorted(df["OBPP"].unique())
             )
-            search = st.text_input("Search Issuer / ISIN")
-
         with f2:
             ratings = sorted(r for r in df["Rating"].dropna().astype(str).unique() if r and r.lower() != "nan")
             rating_filter = st.multiselect("Rating", options=ratings, default=ratings)
-            include_blank_rating = st.checkbox("Include bonds with no rating on file", value=True)
-
-        with f4:
-            confidence_options = sorted(df["Confidence"].unique(), key=lambda t: CONFIDENCE_ORDER.get(t, 99))
-            confidence_filter = st.multiselect("Confidence", options=confidence_options, default=confidence_options)
-
         with f3:
-            if numeric["ytm"].notna().any():
-                ytm_min, ytm_max = float(numeric["ytm"].min()), float(numeric["ytm"].max())
-                ytm_range = st.slider("YTM (%) range", ytm_min, ytm_max, (ytm_min, ytm_max))
-            else:
-                ytm_range = None
-            if numeric["tenure"].notna().any():
-                t_min, t_max = float(numeric["tenure"].min()), float(numeric["tenure"].max())
-                tenure_range = st.slider("Tenure (months) range", t_min, t_max, (t_min, t_max))
-            else:
-                tenure_range = None
+            search = st.text_input("Search Issuer / ISIN", placeholder="e.g. Muthoot, INE...")
+
+        with st.expander("More filters (YTM, tenure, confidence)"):
+            af1, af2 = st.columns(2)
+            with af1:
+                if numeric["ytm"].notna().any():
+                    ytm_min, ytm_max = float(numeric["ytm"].min()), float(numeric["ytm"].max())
+                    ytm_range = st.slider("YTM (%) range", ytm_min, ytm_max, (ytm_min, ytm_max))
+                else:
+                    ytm_range = None
+                confidence_options = sorted(df["Confidence"].unique(), key=lambda t: CONFIDENCE_ORDER.get(t, 99))
+                confidence_filter = st.multiselect("Confidence", options=confidence_options, default=confidence_options)
+            with af2:
+                if numeric["tenure"].notna().any():
+                    t_min, t_max = float(numeric["tenure"].min()), float(numeric["tenure"].max())
+                    tenure_range = st.slider("Tenure (months) range", t_min, t_max, (t_min, t_max))
+                else:
+                    tenure_range = None
+                include_blank_rating = st.checkbox("Include bonds with no rating on file", value=True)
 
     mask = df["OBPP"].isin(obpp_filter) & df["Confidence"].isin(confidence_filter)
 
@@ -377,17 +454,22 @@ with tab_detail:
 
     filtered = df[mask].copy()
 
-    st.caption(f"Showing {len(filtered)} of {len(df)} bonds")
+    st.caption(f"Showing {len(filtered)} of {len(df)} bonds · :green[**highlighted**] rows are top-quartile YTM for the current view")
     st.dataframe(
-        filtered,
+        style_bonds(filtered, ytm_columns=["YTM (%)"], confidence_col="Confidence"),
         width="stretch",
         height=520,
         hide_index=True,
         column_config={
-            "YTM (%)": st.column_config.NumberColumn("YTM (%)", format="%.2f%%"),
-            "Tenure (Months)": st.column_config.NumberColumn("Tenure (mo)", format="%.0f"),
-            "Face Value": st.column_config.NumberColumn("Face Value", format="₹%d"),
-            "Minimum Investment Amount": st.column_config.NumberColumn("Min. Investment", format="₹%d"),
+            "OBPP": st.column_config.TextColumn("OBPP", alignment="left"),
+            "Confidence": st.column_config.TextColumn("Confidence", alignment="left"),
+            "ISIN": st.column_config.TextColumn("ISIN", alignment="left"),
+            "Issuer": st.column_config.TextColumn("Issuer", alignment="left"),
+            "Rating": st.column_config.TextColumn("Rating", alignment="left"),
+            "YTM (%)": st.column_config.NumberColumn("YTM (%)", format="%.2f%%", alignment="left"),
+            "Tenure (Months)": st.column_config.NumberColumn("Tenure (mo)", format="%.0f", alignment="left"),
+            "Face Value": st.column_config.NumberColumn("Face Value", format="₹%d", alignment="left"),
+            "Minimum Investment Amount": st.column_config.NumberColumn("Min. Investment", format="₹%d", alignment="left"),
         },
     )
 
@@ -427,37 +509,41 @@ if comparison:
         gc3.metric("OBPP-only bonds", m["OBPP-only bonds"])
         gc4.metric("Grip win rate on matches", m["Grip win rate on matches (YTM >= best competitor)"])
 
-        gc5, gc6, gc7, gc8 = st.columns(4)
-        gc5.metric("Avg YTM delta (Grip − best OBPP)", m["Avg YTM delta on matches (Grip - best competitor)"])
-        gc6.metric("Grip avg YTM (whole book)", m["Grip avg YTM (entire live book)"])
-        gc7.metric("OBPP avg YTM (all competitors)", m["OBPP avg YTM (all competitors combined)"])
-        gc8.metric("Issuer coverage (Grip vs OBPPs)", f"{m['Unique issuers on Grip']} / {m['Unique issuers across OBPPs']}")
-
         st.divider()
+        st.markdown("#### Matched bonds (same ISIN)")
 
-        def pct_config(*column_names):
-            return {name: st.column_config.NumberColumn(name, format="%.2f%%") for name in column_names}
+        matched = comparison["matched"]
+        matched_display_cols = [
+            "ISIN", "Issuer", "Grip YTM (%)", "Grip Face Value", "Grip Tenure (Months)", "Grip Rating",
+            "Best OBPP", "Best OBPP YTM (%)", "OBPP Face Value", "OBPP Tenure (Months)", "OBPP Rating",
+            "YTM Delta (Grip - OBPP)",
+        ]
+        matched_display_cols = [c for c in matched_display_cols if c in matched.columns]
 
-        sub_tab1, sub_tab2, sub_tab3 = st.tabs(["Matched bonds (same ISIN)", "Grip-only bonds", "OBPP-only bonds"])
-        with sub_tab1:
-            st.dataframe(
-                comparison["matched"], width="stretch", height=350, hide_index=True,
-                column_config=pct_config("Grip YTM (%)", "Best OBPP YTM (%)", "YTM Delta (Grip - OBPP)"),
-            )
-        with sub_tab2:
-            st.dataframe(
-                comparison["grip_only"], width="stretch", height=350, hide_index=True,
-                column_config=pct_config("Grip YTM (%)"),
-            )
-        with sub_tab3:
-            st.dataframe(
-                comparison["obpp_only"], width="stretch", height=350, hide_index=True,
-                column_config=pct_config("Best OBPP YTM (%)"),
-            )
+        st.dataframe(
+            style_bonds(matched[matched_display_cols], ytm_columns=["Grip YTM (%)"]),
+            width="stretch",
+            height=400,
+            hide_index=True,
+            column_config={
+                "ISIN": st.column_config.TextColumn("ISIN", alignment="left"),
+                "Issuer": st.column_config.TextColumn("Issuer", alignment="left"),
+                "Grip YTM (%)": st.column_config.NumberColumn("Grip YTM (%)", format="%.2f%%", alignment="left"),
+                "Grip Face Value": st.column_config.NumberColumn("Grip Face Value", format="₹%d", alignment="left"),
+                "Grip Tenure (Months)": st.column_config.NumberColumn("Grip Tenure (mo)", format="%.0f", alignment="left"),
+                "Grip Rating": st.column_config.TextColumn("Grip Rating", alignment="left"),
+                "Best OBPP": st.column_config.TextColumn("Best OBPP", alignment="left"),
+                "Best OBPP YTM (%)": st.column_config.NumberColumn("Best OBPP YTM (%)", format="%.2f%%", alignment="left"),
+                "OBPP Face Value": st.column_config.NumberColumn("OBPP Face Value", format="₹%d", alignment="left"),
+                "OBPP Tenure (Months)": st.column_config.NumberColumn("OBPP Tenure (mo)", format="%.0f", alignment="left"),
+                "OBPP Rating": st.column_config.TextColumn("OBPP Rating", alignment="left"),
+                "YTM Delta (Grip - OBPP)": st.column_config.NumberColumn("YTM Delta", format="%.2f%%", alignment="left"),
+            },
+        )
 
-        if not comparison["matched"].empty:
+        if not matched.empty:
             with st.expander("YTM delta by bond (matched, Grip − best OBPP)"):
-                st.bar_chart(comparison["matched"].set_index("ISIN")["YTM Delta (Grip - OBPP)"])
+                st.bar_chart(matched.set_index("ISIN")["YTM Delta (Grip - OBPP)"])
 
         comparison_buffer = io.BytesIO()
         with pd.ExcelWriter(comparison_buffer, engine="openpyxl") as writer:
@@ -466,7 +552,7 @@ if comparison:
             comparison["obpp_only"].to_excel(writer, index=False, sheet_name="OBPP only")
             pd.DataFrame(list(m.items()), columns=["Metric", "Value"]).to_excel(writer, index=False, sheet_name="Metrics")
         st.download_button(
-            "Download Grip comparison as Excel",
+            "Download full Grip comparison as Excel (incl. Grip-only / OBPP-only)",
             data=comparison_buffer.getvalue(),
             file_name="grip_vs_obpp_comparison.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -485,4 +571,13 @@ with tab_quality:
         {"OBPP": platform, "Confidence": tier, "Why": note}
         for platform, (tier, note) in sorted(CONFIDENCE.items(), key=lambda kv: CONFIDENCE_ORDER.get(kv[1][0], 99))
     ]
-    st.dataframe(pd.DataFrame(guide_rows), width="stretch", hide_index=True)
+    st.dataframe(
+        style_bonds(pd.DataFrame(guide_rows), confidence_col="Confidence"),
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "OBPP": st.column_config.TextColumn("OBPP", alignment="left"),
+            "Confidence": st.column_config.TextColumn("Confidence", alignment="left"),
+            "Why": st.column_config.TextColumn("Why", alignment="left", width="large"),
+        },
+    )
